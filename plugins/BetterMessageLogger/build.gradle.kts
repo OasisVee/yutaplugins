@@ -1,9 +1,12 @@
-version = "1.0.15"
+version = "1.0.16"
 description = "Keeps deleted messages and edit history visible in Discord chats."
 
 aliucord {
     changelog.set(
         """
+        # 1.0.16
+        * Remove inline edit history immediately when deleting a logged message.
+
         # 1.0.15
         * Add visual color picker
 

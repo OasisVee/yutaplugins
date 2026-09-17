@@ -312,6 +312,8 @@ public class BetterMessageLogger extends Plugin {
             if (historyEnd == 0) return;
             builder.setSpan(new ForegroundColorSpan(mutedColor), 0, historyEnd,
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            builder.setSpan(new InlineEditHistorySpan(), 0, historyEnd,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             builder.append(textView.getText());
             textView.setDraweeSpanStringBuilder(builder);
         } catch (Throwable error) {
@@ -741,6 +743,64 @@ public class BetterMessageLogger extends Plugin {
             scheduleDeletedLabel(entry.getKey(), entry.getValue());
         }
     }
+
+    private void refreshVisibleInlineEditHistory(long messageId) {
+        List<Map.Entry<WidgetChatListAdapterItemMessage, Long>> bound;
+        synchronized (boundMessageItems) {
+            bound = new ArrayList<>(boundMessageItems.entrySet());
+        }
+        for (Map.Entry<WidgetChatListAdapterItemMessage, Long> entry : bound) {
+            Long boundId = entry.getValue();
+            if (boundId != null && boundId == messageId) {
+                scheduleInlineEditHistoryRemoval(entry.getKey(), messageId);
+            }
+        }
+    }
+
+    private void scheduleInlineEditHistoryRemoval(WidgetChatListAdapterItemMessage item, long messageId) {
+        item.itemView.post(() -> {
+            // A RecyclerView item can be rebound before this callback runs.
+            Long boundId = boundMessageItems.get(item);
+            if (boundId == null || boundId != messageId) return;
+            removeInlineEditHistory(item.itemView);
+        });
+    }
+
+    private void removeInlineEditHistory(View root) {
+        int textId = Utils.getResId("chat_list_adapter_item_text", "id");
+        View view = textId == 0 ? null : root.findViewById(textId);
+        if (!(view instanceof TextView)) return;
+        TextView textView = (TextView) view;
+        com.facebook.drawee.span.DraweeSpanStringBuilder builder = getNativeTextBuilder(textView);
+        if (builder == null) return;
+
+        InlineEditHistorySpan[] historySpans =
+                builder.getSpans(0, builder.length(), InlineEditHistorySpan.class);
+        boolean changed = false;
+        for (InlineEditHistorySpan historySpan : historySpans) {
+            int start = builder.getSpanStart(historySpan);
+            int end = builder.getSpanEnd(historySpan);
+            builder.removeSpan(historySpan);
+            if (start >= 0 && end > start && end <= builder.length()) {
+                builder.delete(start, end);
+                changed = true;
+            }
+        }
+        if (changed) {
+            // Keep the native builder and its link/emoji spans intact; only remove the
+            // history prefix that this plugin added. Disable auto-linking while rebinding
+            // so Discord does not replace the existing link callbacks.
+            int autoLinkMask = textView.getAutoLinkMask();
+            textView.setAutoLinkMask(0);
+            try {
+                ((com.discord.utilities.view.text.SimpleDraweeSpanTextView) textView)
+                        .setDraweeSpanStringBuilder(builder);
+            } finally {
+                textView.setAutoLinkMask(autoLinkMask);
+            }
+        }
+    }
+
     private void scheduleDeletedLabel(WidgetChatListAdapterItemMessage item, long messageId) {
         item.itemView.post(() -> {
             // A RecyclerView item can be rebound before this callback runs.
@@ -975,6 +1035,9 @@ public class BetterMessageLogger extends Plugin {
         }
     }
 
+    private static final class InlineEditHistorySpan {
+    }
+
     private static final class DeletedLabelSpan extends DeletedColorSpan {
         DeletedLabelSpan(int color) {
             super(color);
@@ -1009,6 +1072,7 @@ public class BetterMessageLogger extends Plugin {
     private void deleteLoggedMessage(long id) {
         removeRecord(id);
         refreshVisibleDeletedTags();
+        refreshVisibleInlineEditHistory(id);
         bumpRevision();
         Utils.showToast("Logged message deleted");
     }

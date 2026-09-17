@@ -9,7 +9,7 @@ import com.aliucord.entities.Plugin;
 import com.aliucord.patcher.Hook;
 import com.discord.widgets.user.profile.UserProfileAdminView;
 
-/** Leaves only the Manage User action in the profile-sheet moderation section. */
+/** Leaves Manage User, and Remove from Group in multi-user DMs, in the profile-sheet moderation section. */
 @SuppressWarnings("unused")
 @AliucordPlugin
 public final class HideModActions extends Plugin {
@@ -31,7 +31,12 @@ public final class HideModActions extends Plugin {
                 new Class<?>[]{UserProfileAdminView.ViewState.class},
                 new Hook(frame -> {
                     UserProfileAdminView adminView = (UserProfileAdminView) frame.thisObject;
+                    UserProfileAdminView.ViewState state =
+                            (UserProfileAdminView.ViewState) frame.args[0];
                     for (String action : HIDDEN_ACTIONS) {
+                        if ("user_profile_admin_kick".equals(action) && state.isMultiUserDM()) {
+                            continue;
+                        }
                         hideView(adminView, action);
                     }
                 })

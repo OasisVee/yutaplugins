@@ -22,6 +22,7 @@ import com.discord.stores.StoreGatewayConnection;
 import com.discord.stores.StoreConnectionOpen;
 import com.discord.stores.StoreStream;
 import com.discord.stores.StoreUserPresence;
+import com.discord.utilities.icon.IconUtils;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -36,13 +37,12 @@ public final class CustomRPC extends Plugin {
     public static final String ENABLED = "enabled";
     public static final String ACTIVITY_TYPE = "activityType";
     public static final String ACTIVITY_FLAGS = "activityFlags";
-    public static final String APPLICATION_ID = "applicationId";
     public static final String NAME = "name";
     public static final String DETAILS = "details";
     public static final String STATE = "state";
-    public static final String LARGE_IMAGE = "largeImage";
+    public static final String LARGE_IMAGE_URL = "largeImageUrl";
     public static final String LARGE_IMAGE_TEXT = "largeImageText";
-    public static final String SMALL_IMAGE = "smallImage";
+    public static final String SMALL_IMAGE_URL = "smallImageUrl";
     public static final String SMALL_IMAGE_TEXT = "smallImageText";
 
     private static final String DEFAULT_NAME = "Custom RPC";
@@ -62,6 +62,21 @@ public final class CustomRPC extends Plugin {
     @Override
     public void start(@NonNull Context context) {
         if (isEnabled()) enableActivitySharing(context);
+
+        // Discord's native renderer resolves every activity image as an application
+        // asset when the value is not an already-proxied "mp:" image. Let public
+        // URLs go directly to the image loader so they work without an application ID.
+        patcher.patch(
+                IconUtils.class,
+                "getAssetImage",
+                new Class<?>[]{Long.class, String.class, int.class},
+                new PreHook(param -> {
+                    if (param.args[1] instanceof String) {
+                        String url = publicImageUrl((String) param.args[1]);
+                        if (url != null) param.setResult(url);
+                    }
+                })
+        );
 
         patcher.patch(
                 AppActivity.class,
@@ -189,15 +204,14 @@ public final class CustomRPC extends Plugin {
         return ActivityFlags.label(getActivityFlags());
     }
 
-    boolean saveAndApply(String applicationId, String name, String details, String state,
-            String largeImage, String largeImageText, String smallImage, String smallImageText) {
-        settings.setString(APPLICATION_ID, clean(applicationId));
+    boolean saveAndApply(String name, String details, String state,
+            String largeImageUrl, String largeImageText, String smallImageUrl, String smallImageText) {
         settings.setString(NAME, clean(name));
         settings.setString(DETAILS, clean(details));
         settings.setString(STATE, clean(state));
-        settings.setString(LARGE_IMAGE, clean(largeImage));
+        settings.setString(LARGE_IMAGE_URL, clean(largeImageUrl));
         settings.setString(LARGE_IMAGE_TEXT, clean(largeImageText));
-        settings.setString(SMALL_IMAGE, clean(smallImage));
+        settings.setString(SMALL_IMAGE_URL, clean(smallImageUrl));
         settings.setString(SMALL_IMAGE_TEXT, clean(smallImageText));
         enableActivitySharing(null);
         setEnabled(true);
@@ -211,10 +225,6 @@ public final class CustomRPC extends Plugin {
 
     private boolean isEnabled() {
         return settings.getBool(ENABLED, false);
-    }
-
-    boolean hasValidApplicationId() {
-        return parseApplicationId() != null;
     }
 
     private void reapplyIfEnabled() {
@@ -307,17 +317,13 @@ public final class CustomRPC extends Plugin {
         String name = value(NAME, DEFAULT_NAME);
         String details = optional(DETAILS);
         String state = optional(STATE);
-        String largeImage = optional(LARGE_IMAGE);
-        String largeImageText = optional(LARGE_IMAGE_TEXT);
-        String smallImage = optional(SMALL_IMAGE);
-        String smallImageText = optional(SMALL_IMAGE_TEXT);
-        Long applicationId = parseApplicationId();
+        String largeImageUrl = publicImageUrl(optional(LARGE_IMAGE_URL));
+        String largeImageText = largeImageUrl == null ? null : optional(LARGE_IMAGE_TEXT);
+        String smallImageUrl = publicImageUrl(optional(SMALL_IMAGE_URL));
+        String smallImageText = smallImageUrl == null ? null : optional(SMALL_IMAGE_TEXT);
 
-        // Discord assets belong to a Developer Application. Keep text-only
-        // activities valid when no application ID was configured.
-        ActivityAssets assets = applicationId != null && (largeImage != null || largeImageText != null
-                || smallImage != null || smallImageText != null)
-                ? new ActivityAssets(largeImage, largeImageText, smallImage, smallImageText)
+        ActivityAssets assets = largeImageUrl != null || smallImageUrl != null
+                ? new ActivityAssets(largeImageUrl, largeImageText, smallImageUrl, smallImageText)
                 : null;
 
         return new Activity(
@@ -326,7 +332,7 @@ public final class CustomRPC extends Plugin {
                 null,
                 System.currentTimeMillis(),
                 null,
-                applicationId,
+                null,
                 details,
                 state,
                 null,
@@ -342,17 +348,6 @@ public final class CustomRPC extends Plugin {
         );
     }
 
-    private Long parseApplicationId() {
-        String raw = optional(APPLICATION_ID);
-        if (raw == null) return null;
-        try {
-            long value = Long.parseLong(raw);
-            return value > 0 ? value : null;
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
-    }
-
     @SuppressWarnings("SameParameterValue")
     private String value(String key, String fallback) {
         String value = optional(key);
@@ -366,6 +361,14 @@ public final class CustomRPC extends Plugin {
 
     private static String clean(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String publicImageUrl(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.regionMatches(true, 0, "http://", 0, 7)
+                || trimmed.regionMatches(true, 0, "https://", 0, 8)
+                ? trimmed : null;
     }
 
     private static boolean isSupportedActivityType(ActivityType activityType) {

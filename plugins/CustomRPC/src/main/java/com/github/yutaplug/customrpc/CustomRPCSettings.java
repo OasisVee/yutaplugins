@@ -1,14 +1,11 @@
 package com.github.yutaplug.customrpc;
 
 import android.content.Context;
-import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.*;
-import android.net.Uri;
 import android.os.Bundle;
-import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -43,13 +40,12 @@ public final class CustomRPCSettings extends BottomSheet {
     private CheckedSetting enabledSetting;
     private TextView activityTypeSummary;
     private TextView activityFlagsSummary;
-    private EditText applicationId;
     private EditText name;
     private EditText details;
     private EditText state;
-    private EditText largeImage;
+    private EditText largeImageUrl;
     private EditText largeImageText;
-    private EditText smallImage;
+    private EditText smallImageUrl;
     private EditText smallImageText;
 
     public CustomRPCSettings(SettingsAPI settings, CustomRPC plugin) {
@@ -85,17 +81,13 @@ public final class CustomRPCSettings extends BottomSheet {
         details = addInput(context, "Details", CustomRPC.DETAILS, "");
         state = addInput(context, "State", CustomRPC.STATE, "");
 
-        addSectionHeader(context, "Application and assets", false);
-        addIntro(context, "Application ID is optional for text-only activities. It is needed for images and full Rich Presence features.");
-        applicationId = addInput(context, "Application ID (optional)", CustomRPC.APPLICATION_ID,
-                "");
-        applicationId.setInputType(InputType.TYPE_CLASS_NUMBER);
-        addButton(context, "Get an Application ID", () -> openDeveloperApplications(context));
-        largeImage = addInput(context, "Large image key (optional)", CustomRPC.LARGE_IMAGE,
+        addSectionHeader(context, "Images", false);
+        addIntro(context, "Use publicly accessible HTTP(S) image URLs. Discord must be able to fetch them.");
+        largeImageUrl = addInput(context, "Large image URL (optional)", CustomRPC.LARGE_IMAGE_URL,
                 "");
         largeImageText = addInput(context, "Large image text (optional)", CustomRPC.LARGE_IMAGE_TEXT,
                 "");
-        smallImage = addInput(context, "Small image key (optional)", CustomRPC.SMALL_IMAGE,
+        smallImageUrl = addInput(context, "Small image URL (optional)", CustomRPC.SMALL_IMAGE_URL,
                 "");
         smallImageText = addInput(context, "Small image text (optional)", CustomRPC.SMALL_IMAGE_TEXT,
                 "");
@@ -103,13 +95,12 @@ public final class CustomRPCSettings extends BottomSheet {
         addButton(context, "Save and apply", () -> {
             plugin.enableActivitySharing(requireActivity());
             boolean applied = plugin.saveAndApply(
-                    text(applicationId),
                     text(name),
                     text(details),
                     text(state),
-                    text(largeImage),
+                    text(largeImageUrl),
                     text(largeImageText),
-                    text(smallImage),
+                    text(smallImageUrl),
                     text(smallImageText)
             );
             if (applied) {
@@ -163,17 +154,6 @@ public final class CustomRPCSettings extends BottomSheet {
         super.onPause();
         for (Map.Entry<String, EditText> input : inputs.entrySet()) {
             saveChanges(input.getKey(), input.getValue());
-        }
-    }
-
-    private void openDeveloperApplications(Context context) {
-        try {
-            context.startActivity(new Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://discord.com/developers/applications")
-            ));
-        } catch (Throwable error) {
-            Utils.showToast("Could not open Discord Developer Portal");
         }
     }
 

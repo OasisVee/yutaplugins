@@ -28,6 +28,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
+import androidx.recyclerview.widget.RecyclerView;
 
 import com.aliucord.Constants;
 import com.aliucord.Utils;
@@ -36,9 +37,12 @@ import com.aliucord.api.CommandsAPI;
 import com.aliucord.api.SettingsAPI;
 import com.aliucord.entities.Plugin;
 import com.aliucord.utils.DimenUtils;
+import com.discord.api.channel.ChannelUtils;
+import com.discord.api.permission.Permission;
 import com.discord.app.AppActivity;
 import com.discord.stores.StoreStream;
 import com.discord.utilities.color.ColorCompat;
+import com.discord.utilities.permissions.PermissionUtils;
 import com.discord.widgets.chat.input.ChatInputViewModel;
 import com.discord.widgets.chat.input.WidgetChatInput;
 import com.discord.widgets.chat.input.WidgetChatInputEditText$setOnTextChangedListener$1;
@@ -76,6 +80,44 @@ public class VoiceMessages extends Plugin {
     private ViewGroup inputContainer;
     private RelativeLayout inputLayout;
     private View attachmentPreview;
+    private View attachmentLayoutRoot;
+    private RecyclerView attachmentPreviewList;
+    private RecyclerView.Adapter<?> observedAttachmentAdapter;
+    private final RecyclerView.AdapterDataObserver attachmentAdapterObserver =
+            new RecyclerView.AdapterDataObserver() {
+                @Override
+                public void onChanged() {
+                    updateRecordButtonVisibility();
+                }
+
+                @Override
+                public void onItemRangeChanged(int positionStart, int itemCount) {
+                    updateRecordButtonVisibility();
+                }
+
+                @Override
+                public void onItemRangeChanged(int positionStart, int itemCount, Object payload) {
+                    updateRecordButtonVisibility();
+                }
+
+                @Override
+                public void onItemRangeInserted(int positionStart, int itemCount) {
+                    updateRecordButtonVisibility();
+                }
+
+                @Override
+                public void onItemRangeRemoved(int positionStart, int itemCount) {
+                    updateRecordButtonVisibility();
+                }
+
+                @Override
+                public void onItemRangeMoved(int fromPosition, int toPosition, int itemCount) {
+                    updateRecordButtonVisibility();
+                }
+            };
+    private final View.OnLayoutChangeListener attachmentLayoutListener = (
+            view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom
+    ) -> updateRecordButtonVisibility();
     private AppCompatImageButton recordButton;
     private Drawable recordIcon;
     private View observedActivityRoot;
@@ -522,7 +564,20 @@ public class VoiceMessages extends Plugin {
         editText = candidateEditText;
         inputContainer = candidateContainer;
         inputLayout = (RelativeLayout) candidateParent;
-        attachmentPreview = root.findViewById(Utils.getResId("attachment_preview_container", "id"));
+        View candidateAttachmentRoot = inputLayout.getParent() instanceof View
+                ? (View) inputLayout.getParent()
+                : root;
+        View candidateAttachmentPreview = candidateAttachmentRoot.findViewById(
+                Utils.getResId("attachment_preview_container", "id")
+        );
+        RecyclerView candidateAttachmentPreviewList = candidateAttachmentRoot.findViewById(
+                Utils.getResId("attachment_preview_list", "id")
+        );
+        observeAttachmentLayout(
+                candidateAttachmentRoot,
+                candidateAttachmentPreview,
+                candidateAttachmentPreviewList
+        );
 
         View existingButton = inputLayout.findViewWithTag(BUTTON_TAG);
         if (existingButton != null && existingButton != recordButton) {
@@ -549,6 +604,91 @@ public class VoiceMessages extends Plugin {
         }
         removeActivityLayoutObserver();
         return true;
+    }
+
+    private void observeAttachmentLayout(
+            View candidateRoot,
+            View candidatePreview,
+            RecyclerView candidatePreviewList
+    ) {
+        if (attachmentLayoutRoot != candidateRoot) {
+            if (attachmentLayoutRoot != null) {
+                attachmentLayoutRoot.removeOnLayoutChangeListener(attachmentLayoutListener);
+            }
+            attachmentLayoutRoot = candidateRoot;
+            if (attachmentLayoutRoot != null) {
+                attachmentLayoutRoot.addOnLayoutChangeListener(attachmentLayoutListener);
+            }
+        }
+        if (attachmentPreview != candidatePreview) {
+            if (attachmentPreview != null) {
+                attachmentPreview.removeOnLayoutChangeListener(attachmentLayoutListener);
+            }
+            attachmentPreview = candidatePreview;
+            if (attachmentPreview != null) {
+                attachmentPreview.addOnLayoutChangeListener(attachmentLayoutListener);
+            }
+        }
+        if (attachmentPreviewList != candidatePreviewList) {
+            unregisterAttachmentAdapterObserver();
+            attachmentPreviewList = candidatePreviewList;
+        }
+        observeAttachmentAdapter();
+    }
+
+    private void removeAttachmentObservers() {
+        if (attachmentLayoutRoot != null) {
+            attachmentLayoutRoot.removeOnLayoutChangeListener(attachmentLayoutListener);
+            attachmentLayoutRoot = null;
+        }
+        if (attachmentPreview != null) {
+            attachmentPreview.removeOnLayoutChangeListener(attachmentLayoutListener);
+            attachmentPreview = null;
+        }
+        unregisterAttachmentAdapterObserver();
+        attachmentPreviewList = null;
+    }
+
+    private void observeAttachmentAdapter() {
+        RecyclerView.Adapter<?> adapter = attachmentPreviewList == null
+                ? null
+                : attachmentPreviewList.getAdapter();
+        if (observedAttachmentAdapter == adapter) {
+            return;
+        }
+
+        unregisterAttachmentAdapterObserver();
+        observedAttachmentAdapter = adapter;
+        if (observedAttachmentAdapter != null) {
+            observedAttachmentAdapter.registerAdapterDataObserver(attachmentAdapterObserver);
+        }
+    }
+
+    private void unregisterAttachmentAdapterObserver() {
+        if (observedAttachmentAdapter != null) {
+            observedAttachmentAdapter.unregisterAdapterDataObserver(attachmentAdapterObserver);
+            observedAttachmentAdapter = null;
+        }
+    }
+
+    private void refreshAttachmentReference() {
+        if (inputLayout == null) {
+            return;
+        }
+
+        View parent = inputLayout.getParent() instanceof View
+                ? (View) inputLayout.getParent()
+                : null;
+        if (parent == null) {
+            return;
+        }
+        View candidatePreview = parent.findViewById(
+                Utils.getResId("attachment_preview_container", "id")
+        );
+        RecyclerView candidatePreviewList = parent.findViewById(
+                Utils.getResId("attachment_preview_list", "id")
+        );
+        observeAttachmentLayout(parent, candidatePreview, candidatePreviewList);
     }
 
     private void updateButtonPlacement() {
@@ -969,16 +1109,38 @@ public class VoiceMessages extends Plugin {
             return;
         }
 
+        refreshAttachmentReference();
         Editable text = editText.getText();
-        boolean hasAttachments = attachmentPreview != null
-                && attachmentPreview.getVisibility() == View.VISIBLE;
-        boolean canType = isRecording || canUseComposer();
+        RecyclerView.Adapter<?> adapter = attachmentPreviewList == null
+                ? null
+                : attachmentPreviewList.getAdapter();
+        boolean hasAttachments = adapter != null && adapter.getItemCount() > 0;
+        boolean canType = isRecording || (canAttachFiles() && canUseComposer());
         boolean buttonVisible = !audioFileSendInProgress
                 && canType
                 && !hasAttachments
                 && (isRecording || text == null || text.length() == 0);
         recordButton.setVisibility(buttonVisible ? View.VISIBLE : View.GONE);
         updateInputContainerLayout(buttonVisible);
+    }
+
+    private boolean canAttachFiles() {
+        try {
+            var channel = StoreStream.getChannelsSelected().getSelectedChannel();
+            if (channel == null) {
+                return false;
+            }
+            if (ChannelUtils.B(channel)) {
+                return true;
+            }
+            Long permissions = StoreStream.getPermissions()
+                    .getPermissionsByChannel()
+                    .get(channel.k());
+            return PermissionUtils.can(Permission.ATTACH_FILES, permissions);
+        } catch (RuntimeException e) {
+            logger.error(e);
+            return false;
+        }
     }
 
     private boolean canUseComposer() {
@@ -1133,7 +1295,7 @@ public class VoiceMessages extends Plugin {
         editText = null;
         inputContainer = null;
         inputLayout = null;
-        attachmentPreview = null;
+        removeAttachmentObservers();
         waveFormView = null;
         if (instance == this) {
             instance = null;
