@@ -6,6 +6,7 @@ import android.graphics.Paint;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.AbsoluteSizeSpan;
+import android.text.style.BackgroundColorSpan;
 import android.text.style.LeadingMarginSpan;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
@@ -18,7 +19,10 @@ import com.aliucord.entities.Plugin;
 import com.aliucord.entities.Plugin.SettingsTab;
 import com.aliucord.api.SettingsAPI;
 import com.aliucord.patcher.PreHook;
+import com.discord.api.application.Application;
 import com.discord.simpleast.core.node.Node;
+import com.discord.simpleast.code.CodeNode;
+import com.discord.utilities.rest.RestAPI;
 import com.discord.simpleast.core.parser.ParseSpec;
 import com.discord.simpleast.core.parser.Parser;
 import com.discord.simpleast.core.parser.Rule;
@@ -43,11 +47,18 @@ import com.facebook.drawee.span.DraweeSpanStringBuilder;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import rx.functions.Action1;
 
 import b.a.t.b.b.e;
 import kotlin.Unit;
@@ -84,13 +95,19 @@ public final class MarkdownFix extends Plugin {
             Pattern.compile("^(?:#{1,3}[ \\t]+|-#[ \\t]+).*");
     private static final Pattern BLOCK_QUOTE_PATTERN =
             Pattern.compile("^(?: *>>> +(.*)| *>(?!>>) +([^\\n]*\\n?))", Pattern.DOTALL);
+    private static final Pattern GAME_PROFILE_MENTION_PATTERN =
+            Pattern.compile("^<@\\$([0-9]{1,20})>");
+    private static final Pattern ANSI_ESCAPE_PATTERN =
+            Pattern.compile("\\u001B\\[([0-9;]*)m");
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser;
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> forumParser;
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> embedTitlesParser;
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> embedValuesParser;
+    private GameProfileResolver gameProfileResolver = new GameProfileResolver();
 
     @Override
     public void start(Context context) throws Throwable {
+        gameProfileResolver = new GameProfileResolver();
         settingsTab = new SettingsTab(MarkdownFixSettings.class, SettingsTab.Type.BOTTOM_SHEET)
                 .withArgs(settings);
 
@@ -152,6 +169,191 @@ public final class MarkdownFix extends Plugin {
             logger.error("MarkdownFix could not hook modern Markdown block renderers", error);
         }
 
+        try {
+            installAnsiCodeBlockHook();
+        } catch (Throwable error) {
+            // CodeNode is part of Discord's internal parser. Leave ordinary
+            // fenced blocks untouched if its implementation changes.
+            logger.error("MarkdownFix could not render ANSI code blocks", error);
+        }
+
+    }
+
+    private void installAnsiCodeBlockHook() throws Throwable {
+        Method render = CodeNode.class.getDeclaredMethod(
+                "render", SpannableStringBuilder.class, Object.class);
+        patcher.patch(render, new PreHook(frame -> {
+            if (!(frame.thisObject instanceof CodeNode)
+                    || !(frame.args[0] instanceof SpannableStringBuilder)
+                    || !(frame.args[1] instanceof BasicRenderContext)) return;
+
+            try {
+                CodeNode<?> node = (CodeNode<?>) frame.thisObject;
+                if (!"ansi".equalsIgnoreCase(node.a)) return;
+                renderAnsiCodeBlock(
+                        node,
+                        (SpannableStringBuilder) frame.args[0],
+                        (BasicRenderContext) frame.args[1]
+                );
+                frame.setResult(null);
+            } catch (Throwable error) {
+                logger.error("MarkdownFix could not apply ANSI colors", error);
+            }
+        }));
+    }
+
+    private static void renderAnsiCodeBlock(
+            CodeNode node, SpannableStringBuilder builder, BasicRenderContext context) {
+        int start = builder.length();
+        String raw = node.getContent();
+        AnsiStyle style = new AnsiStyle();
+        StringBuilder plainText = new StringBuilder(raw.length());
+        List<AnsiSegment> segments = new ArrayList<>();
+        Matcher matcher = ANSI_ESCAPE_PATTERN.matcher(raw);
+        int cursor = 0;
+        while (matcher.find()) {
+            appendAnsiSegment(plainText, segments, raw, cursor, matcher.start(), style);
+            applyAnsiCodes(style, matcher.group(1), context.getContext());
+            cursor = matcher.end();
+        }
+        appendAnsiSegment(plainText, segments, raw, cursor, raw.length(), style);
+        builder.append(plainText);
+
+        // Keep the same default monospace/code styling that Discord's CodeNode
+        // supplies for every other fenced language. ANSI spans must be added
+        // afterward because Android resolves equal-priority color spans by order.
+        Iterable<?> codeStyles = node.b.get(context);
+        for (Object codeStyle : codeStyles) {
+            builder.setSpan(codeStyle, start, builder.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        for (AnsiSegment segment : segments) {
+            applyAnsiStyle(builder, start + segment.start, start + segment.end, segment.style);
+        }
+    }
+
+    private static void appendAnsiSegment(
+            StringBuilder builder, List<AnsiSegment> segments,
+            String text, int start, int end, AnsiStyle style) {
+        if (end <= start) return;
+        int segmentStart = builder.length();
+        builder.append(text, start, end);
+        int segmentEnd = builder.length();
+        segments.add(new AnsiSegment(segmentStart, segmentEnd, new AnsiStyle(style)));
+    }
+
+    private static void applyAnsiStyle(
+            SpannableStringBuilder builder, int start, int end, AnsiStyle style) {
+        if (style.foreground != null) {
+            builder.setSpan(new ForegroundColorSpan(style.foreground), start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        if (style.background != null) {
+            builder.setSpan(new BackgroundColorSpan(style.background), start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        if (style.bold) {
+            builder.setSpan(new StyleSpan(Typeface.BOLD), start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        if (style.underline) {
+            builder.setSpan(new android.text.style.UnderlineSpan(), start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
+    private static void applyAnsiCodes(AnsiStyle style, String rawCodes, Context context) {
+        if (rawCodes == null || rawCodes.isEmpty()) {
+            style.reset();
+            return;
+        }
+        String[] codes = rawCodes.split(";", -1);
+        for (String rawCode : codes) {
+            int code;
+            try {
+                code = rawCode.isEmpty() ? 0 : Integer.parseInt(rawCode);
+            } catch (NumberFormatException ignored) {
+                continue;
+            }
+            if (code == 0) style.reset();
+            else if (code == 1) style.bold = true;
+            else if (code == 4) style.underline = true;
+            else if (code >= 30 && code <= 37) {
+                style.foreground = ansiColor(code - 30, context);
+            }
+            else if (code == 39) style.foreground = null;
+            else if (code >= 40 && code <= 47) {
+                style.background = ansiColor(code - 40, context);
+            }
+            else if (code == 49) style.background = null;
+        }
+    }
+
+    // August 2026 Discord ANSI palettes: Light, Ash, Dark, and Onyx.
+    // Background codes 40-47 intentionally mirror the foreground row.
+    private static final int[][] ANSI_PALETTES = {
+            {0xFF000000, 0xFFE75858, 0xFF399B5D, 0xFFC07600,
+                    0xFF3789EA, 0xFFE444BB, 0xFF0098A3, 0xFFB6B7BC},
+            {0xFF000000, 0xFFEC6361, 0xFF45A366, 0xFFCE8100,
+                    0xFF4591EC, 0xFFF549C9, 0xFF049FAA, 0xFFB6B7BC},
+            {0xFF000000, 0xFFDE464A, 0xFF1B8D4D, 0xFFA56100,
+                    0xFF1A7CE6, 0xFFD53FAE, 0xFF008995, 0xFFB6B7BC},
+            {0xFF000000, 0xFFD22D39, 0xFF008043, 0xFFA56100,
+                    0xFF006DD4, 0xFFBC3699, 0xFF007C87, 0xFFB6B7BC}
+    };
+
+    private static int ansiColor(int index, Context context) {
+        return ANSI_PALETTES[ansiTheme(context)][index];
+    }
+
+    private static int ansiTheme(Context context) {
+        try {
+            int attr = Utils.getResId("theme_chat_code", "attr");
+            if (attr == 0) return 1; // Ash fallback for older Discord themes.
+            int color = ColorCompat.getThemedColor(context, attr);
+            int luminance = (299 * Color.red(color) + 587 * Color.green(color)
+                    + 114 * Color.blue(color)) / 1000;
+            if (luminance > 150) return 0; // Light
+            if (luminance < 28) return 3; // Onyx
+            if (luminance < 47) return 2; // Dark
+        } catch (Throwable ignored) {
+            // Use Ash when the theme resource is unavailable on an older client.
+        }
+        return 1; // Ash
+    }
+
+    private static final class AnsiStyle {
+        private Integer foreground;
+        private Integer background;
+        private boolean bold;
+        private boolean underline;
+
+        private AnsiStyle() {}
+
+        private AnsiStyle(AnsiStyle other) {
+            foreground = other.foreground;
+            background = other.background;
+            bold = other.bold;
+            underline = other.underline;
+        }
+
+        private void reset() {
+            foreground = null;
+            background = null;
+            bold = false;
+            underline = false;
+        }
+    }
+
+    private static final class AnsiSegment {
+        private final int start;
+        private final int end;
+        private final AnsiStyle style;
+
+        private AnsiSegment(int start, int end, AnsiStyle style) {
+            this.start = start;
+            this.end = end;
+            this.style = style;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -413,17 +615,17 @@ public final class MarkdownFix extends Plugin {
     }
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getParser() {
-        if (parser == null) parser = createParser(settings);
+        if (parser == null) parser = createParser(settings, gameProfileResolver);
         return parser;
     }
 
     private Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> getForumParser() {
-        if (forumParser == null) forumParser = createForumParser(settings);
+        if (forumParser == null) forumParser = createForumParser(settings, gameProfileResolver);
         return forumParser;
     }
 
     private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> createParser(
-            SettingsAPI settings) {
+            SettingsAPI settings, GameProfileResolver gameProfileResolver) {
         Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser =
                 new Parser<>(false);
         Rules rules = Rules.INSTANCE;
@@ -445,20 +647,21 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createChannelMentionRule());
         parser.addRule(rules.createRoleMentionRule());
         parser.addRule(rules.createUserMentionRule());
+        parser.addRule(new GameProfileMentionRule(gameProfileResolver));
         Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> nativeUnicodeRule =
                 rules.createUnicodeEmojiRule();
         parser.addRule(new DynamicUnicodeEmojiRule(nativeUnicodeRule));
         parser.addRule(rules.createTimestampRule());
         parser.addRule(new HeaderRule(settings));
         parser.addRule(new SubtextRule(settings));
-        parser.addRule(new ListRule(settings));
+        parser.addRule(new ListRule(settings, gameProfileResolver));
         parser.addRules(e.a(false, false));
         parser.addRule(rules.createTextReplacementRule());
         return parser;
     }
 
     private static Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState>
-            createForumParser(SettingsAPI settings) {
+            createForumParser(SettingsAPI settings, GameProfileResolver gameProfileResolver) {
         Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> parser =
                 new Parser<>(false);
         Rules rules = Rules.INSTANCE;
@@ -479,12 +682,13 @@ public final class MarkdownFix extends Plugin {
         parser.addRule(rules.createChannelMentionRule());
         parser.addRule(rules.createRoleMentionRule());
         parser.addRule(rules.createUserMentionRule());
+        parser.addRule(new GameProfileMentionRule(gameProfileResolver));
         Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> nativeUnicodeRule =
                 rules.createUnicodeEmojiRule();
         parser.addRule(new DynamicUnicodeEmojiRule(nativeUnicodeRule));
         parser.addRule(rules.createTimestampRule());
         parser.addRule(new HeaderRule(settings));
-        parser.addRule(new ForumListRule(settings));
+        parser.addRule(new ForumListRule(settings, gameProfileResolver));
         parser.addRules(e.a(false, false));
         parser.addRule(rules.createTextReplacementRule());
         return parser;
@@ -568,6 +772,162 @@ public final class MarkdownFix extends Plugin {
         @Override
         public void render(SpannableStringBuilder builder, MessageRenderContext context) {
             builder.append(text);
+        }
+    }
+
+    /** Renders Discord's {@code <@$GAME_ID>} game-profile mention syntax. */
+    private static final class GameProfileMentionRule
+            extends Rule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
+        private final GameProfileResolver resolver;
+
+        private GameProfileMentionRule(GameProfileResolver resolver) {
+            super(GAME_PROFILE_MENTION_PATTERN);
+            this.resolver = resolver;
+        }
+
+        @Override
+        public ParseSpec<MessageRenderContext, MessageParseState> parse(
+                Matcher matcher,
+                Parser<MessageRenderContext, ? super Node<MessageRenderContext>, MessageParseState> parser,
+                MessageParseState state) {
+            return new ParseSpec<>(new GameProfileMentionNode(matcher.group(1), resolver), state);
+        }
+    }
+
+    private static final class GameProfileMentionNode extends Node<MessageRenderContext> {
+        private final String gameId;
+        private final GameProfileResolver resolver;
+
+        private GameProfileMentionNode(String gameId, GameProfileResolver resolver) {
+            this.gameId = gameId;
+            this.resolver = resolver;
+        }
+
+        @Override
+        public void render(SpannableStringBuilder builder, MessageRenderContext context) {
+            int start = builder.length();
+            String gameName = resolver.getName(gameId);
+            String unresolvedText = "@" + gameId;
+            builder.append(gameName == null ? unresolvedText : "@" + gameName);
+            int end = builder.length();
+            styleGameProfileMention(builder, context, start, end);
+            if (gameName == null) resolver.fetchName(
+                    gameId, builder, context, start, end, unresolvedText);
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof GameProfileMentionNode
+                    && gameId.equals(((GameProfileMentionNode) other).gameId);
+        }
+    }
+
+    private static void styleGameProfileMention(
+            SpannableStringBuilder builder, MessageRenderContext context, int start, int end) {
+        Context androidContext = context.getContext();
+        builder.setSpan(new StyleSpan(Typeface.BOLD), start, end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        builder.setSpan(new ForegroundColorSpan(themedColor(
+                androidContext, "theme_chat_mention_foreground", Color.WHITE)), start, end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        builder.setSpan(new BackgroundColorSpan(themedColor(
+                androidContext, "theme_chat_mention_background", Color.TRANSPARENT)), start, end,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    /** Resolves public Discord game/application records away from the main thread. */
+    private static final class GameProfileResolver {
+        private final Map<String, String> names = new ConcurrentHashMap<>();
+        private final Set<String> requests = ConcurrentHashMap.newKeySet();
+        private final Map<String, List<GameMentionTarget>> targets = new ConcurrentHashMap<>();
+        private volatile boolean active = true;
+
+        private String getName(String gameId) {
+            return names.get(gameId);
+        }
+
+        private void fetchName(
+                String gameId, SpannableStringBuilder builder, MessageRenderContext context,
+                int start, int end, String unresolvedText) {
+            if (!active) return;
+            targets.computeIfAbsent(gameId, ignored -> new CopyOnWriteArrayList<>())
+                    .add(new GameMentionTarget(builder, context, start, end, unresolvedText));
+            if (!requests.add(gameId)) return;
+
+            Utils.threadPool.execute(() -> requestGameName(gameId));
+        }
+
+        private void requestGameName(String gameId) {
+            try {
+                long applicationId = Long.parseLong(gameId);
+                RestAPI.Companion.getApi().getApplications(applicationId).W(
+                        (Action1<List<Application>>) applications -> {
+                            String name = null;
+                            if (applications != null) {
+                                for (Application application : applications) {
+                                    if (application != null && application.g() == applicationId) {
+                                        name = application.h();
+                                        break;
+                                    }
+                                }
+                            }
+                            resolveName(gameId, name == null ? null : name.trim());
+                        },
+                        (Action1<Throwable>) ignored -> resolveName(gameId, null)
+                );
+            } catch (Throwable ignored) {
+                resolveName(gameId, null);
+            }
+        }
+
+        private void resolveName(String gameId, String name) {
+            if (name == null || name.isEmpty() || !active) {
+                requests.remove(gameId);
+                targets.remove(gameId);
+                return;
+            }
+            names.put(gameId, name);
+            requests.remove(gameId);
+            Utils.mainThread.post(() -> replacePendingMentions(gameId, name));
+        }
+
+        private void replacePendingMentions(String gameId, String name) {
+            List<GameMentionTarget> pending = targets.remove(gameId);
+            if (!active || pending == null) return;
+            for (GameMentionTarget target : pending) {
+                SpannableStringBuilder builder = target.builder.get();
+                if (builder == null || target.end > builder.length()) continue;
+                if (!target.unresolvedText.contentEquals(
+                        builder.subSequence(target.start, target.end))) continue;
+                builder.replace(target.start, target.end, "@" + name);
+                styleGameProfileMention(
+                        builder, target.context, target.start, target.start + name.length() + 1);
+            }
+        }
+
+        private void stop() {
+            active = false;
+            names.clear();
+            requests.clear();
+            targets.clear();
+        }
+    }
+
+    private static final class GameMentionTarget {
+        private final WeakReference<SpannableStringBuilder> builder;
+        private final MessageRenderContext context;
+        private final int start;
+        private final int end;
+        private final String unresolvedText;
+
+        private GameMentionTarget(
+                SpannableStringBuilder builder, MessageRenderContext context,
+                int start, int end, String unresolvedText) {
+            this.builder = new WeakReference<>(builder);
+            this.context = context;
+            this.start = start;
+            this.end = end;
+            this.unresolvedText = unresolvedText;
         }
     }
 
@@ -705,10 +1065,12 @@ public final class MarkdownFix extends Plugin {
     private static final class ListRule
             extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
         private final SettingsAPI settings;
+        private final GameProfileResolver gameProfileResolver;
 
-        private ListRule(SettingsAPI settings) {
+        private ListRule(SettingsAPI settings, GameProfileResolver gameProfileResolver) {
             super(LIST_PATTERN);
             this.settings = settings;
+            this.gameProfileResolver = gameProfileResolver;
         }
 
         @Override
@@ -729,7 +1091,7 @@ public final class MarkdownFix extends Plugin {
             // parser's last match from blocking the next consecutive list item,
             // while the BlockRule keeps hyphens in ordinary inline text intact.
             Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> bodyParser =
-                    createParser(settings);
+                    createParser(settings, gameProfileResolver);
             for (Node<MessageRenderContext> child : bodyParser.parse(body, state)) {
                 node.addChild(child);
             }
@@ -740,10 +1102,12 @@ public final class MarkdownFix extends Plugin {
     private static final class ForumListRule
             extends Rule.BlockRule<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> {
         private final SettingsAPI settings;
+        private final GameProfileResolver gameProfileResolver;
 
-        private ForumListRule(SettingsAPI settings) {
+        private ForumListRule(SettingsAPI settings, GameProfileResolver gameProfileResolver) {
             super(FORUM_LIST_PATTERN);
             this.settings = settings;
+            this.gameProfileResolver = gameProfileResolver;
         }
 
         @Override
@@ -760,7 +1124,7 @@ public final class MarkdownFix extends Plugin {
 
             String body = matcher.group(2);
             Parser<MessageRenderContext, Node<MessageRenderContext>, MessageParseState> bodyParser =
-                    createParser(settings);
+                    createParser(settings, gameProfileResolver);
             for (Node<MessageRenderContext> child : bodyParser.parse(body, state)) {
                 node.addChild(child);
             }
@@ -855,5 +1219,6 @@ public final class MarkdownFix extends Plugin {
         forumParser = null;
         embedTitlesParser = null;
         embedValuesParser = null;
+        gameProfileResolver.stop();
     }
 }
