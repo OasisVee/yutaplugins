@@ -381,8 +381,14 @@ public class BetterMessageLogger extends Plugin {
             record.editedTimestamp = null;
         }
         String newContent = message.i();
+        boolean isEdit = message.j() != null && message.j().g() > 0L;
         if (newContent != null && !newContent.equals(record.content)) {
-            if (editLoggingEnabled()) record.addEdit(record.content, editTime(message));
+            // MESSAGE_UPDATE is also used for content-bearing updates which are not
+            // user edits. NitroSpoof can produce one while sending an unavailable
+            // custom emoji, so only create history when Discord marks the update as
+            // an edit. This matches Discord's edited_timestamp contract and keeps
+            // those sends out of the edit log.
+            if (isEdit && editLoggingEnabled()) record.addEdit(record.content, editTime(message));
             record.content = newContent;
         }
         if (old != null) {
