@@ -4,6 +4,8 @@ import android.content.Context;
 
 import androidx.annotation.NonNull;
 
+import com.aliucord.Http;
+import com.aliucord.Utils;
 import com.aliucord.annotations.AliucordPlugin;
 import com.aliucord.entities.Plugin;
 import com.aliucord.patcher.Hook;
@@ -23,11 +25,18 @@ import com.discord.stores.StoreConnectionOpen;
 import com.discord.stores.StoreStream;
 import com.discord.stores.StoreUserPresence;
 import com.discord.utilities.icon.IconUtils;
+import com.discord.utilities.rest.RestAPI;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
+import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.lang.ref.WeakReference;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import kotlin.Unit;
 
@@ -37,22 +46,30 @@ public final class CustomRPC extends Plugin {
     public static final String ENABLED = "enabled";
     public static final String ACTIVITY_TYPE = "activityType";
     public static final String ACTIVITY_FLAGS = "activityFlags";
+    public static final String APPLICATION_ID = "applicationId";
     public static final String NAME = "name";
     public static final String DETAILS = "details";
     public static final String STATE = "state";
-    public static final String LARGE_IMAGE_URL = "largeImageUrl";
+    public static final String LARGE_IMAGE = "largeImage";
     public static final String LARGE_IMAGE_TEXT = "largeImageText";
-    public static final String SMALL_IMAGE_URL = "smallImageUrl";
+    public static final String SMALL_IMAGE = "smallImage";
     public static final String SMALL_IMAGE_TEXT = "smallImageText";
+    public static final String LARGE_IMAGE_URL = "largeImageUrl";
+    public static final String SMALL_IMAGE_URL = "smallImageUrl";
 
     private static final String DEFAULT_NAME = "Custom RPC";
+    private static final long EXTERNAL_IMAGE_RETRY_DELAY_MS = 60_000L;
     private static final ActivityType DEFAULT_ACTIVITY_TYPE = ActivityType.PLAYING;
     // Match Vencord's known-working custom RPC payload for all local and gateway paths.
     private static final int DEFAULT_ACTIVITY_FLAGS = ActivityFlags.INSTANCE | ActivityFlags.EMBEDDED;
 
     private boolean updatingPresence;
+    private boolean presenceUpdatePending;
     private boolean activitySharingEnabled;
     private WeakReference<AppActivity> lastActivity;
+    private final Map<String, String> externalImagePaths = new ConcurrentHashMap<>();
+    private final Map<String, Long> externalImageFailures = new ConcurrentHashMap<>();
+    private final Set<String> externalImageRequests = ConcurrentHashMap.newKeySet();
 
     public CustomRPC() {
         settingsTab = new SettingsTab(CustomRPCSettings.class, SettingsTab.Type.BOTTOM_SHEET)
@@ -64,8 +81,8 @@ public final class CustomRPC extends Plugin {
         if (isEnabled()) enableActivitySharing(context);
 
         // Discord's native renderer resolves every activity image as an application
-        // asset when the value is not an already-proxied "mp:" image. Let public
-        // URLs go directly to the image loader so they work without an application ID.
+        // asset when the value is not an already-proxied "mp:" image. Keep raw public
+        // URLs working locally while external URLs are being proxied for other clients.
         patcher.patch(
                 IconUtils.class,
                 "getAssetImage",
@@ -150,6 +167,10 @@ public final class CustomRPC extends Plugin {
     public void stop(@NonNull Context context) {
         patcher.unpatchAll();
         activitySharingEnabled = false;
+        presenceUpdatePending = false;
+        externalImagePaths.clear();
+        externalImageFailures.clear();
+        externalImageRequests.clear();
         clearActivity();
     }
 
@@ -204,15 +225,20 @@ public final class CustomRPC extends Plugin {
         return ActivityFlags.label(getActivityFlags());
     }
 
-    boolean saveAndApply(String name, String details, String state,
-            String largeImageUrl, String largeImageText, String smallImageUrl, String smallImageText) {
+    boolean saveAndApply(String applicationId, String name, String details, String state,
+            String largeImage, String largeImageText, String smallImage, String smallImageText,
+            String largeImageUrl, String smallImageUrl) {
+        settings.setString(APPLICATION_ID, clean(applicationId));
         settings.setString(NAME, clean(name));
         settings.setString(DETAILS, clean(details));
         settings.setString(STATE, clean(state));
-        settings.setString(LARGE_IMAGE_URL, clean(largeImageUrl));
+        settings.setString(LARGE_IMAGE, clean(largeImage));
         settings.setString(LARGE_IMAGE_TEXT, clean(largeImageText));
-        settings.setString(SMALL_IMAGE_URL, clean(smallImageUrl));
+        settings.setString(SMALL_IMAGE, clean(smallImage));
         settings.setString(SMALL_IMAGE_TEXT, clean(smallImageText));
+        settings.setString(LARGE_IMAGE_URL, clean(largeImageUrl));
+        settings.setString(SMALL_IMAGE_URL, clean(smallImageUrl));
+        clearExternalImageCache();
         enableActivitySharing(null);
         setEnabled(true);
         return true;
@@ -220,6 +246,11 @@ public final class CustomRPC extends Plugin {
 
     void saveField(String key, String value) {
         settings.setString(key, clean(value));
+        if (APPLICATION_ID.equals(key)
+                || LARGE_IMAGE_URL.equals(key)
+                || SMALL_IMAGE_URL.equals(key)) {
+            clearExternalImageCache();
+        }
         if (isEnabled()) applyActivity();
     }
 
@@ -247,6 +278,7 @@ public final class CustomRPC extends Plugin {
 
     private void applyActivity() {
         if (!isEnabled()) return;
+        requestExternalImages();
         updatePresence(getActivityType(), createActivity());
     }
 
@@ -259,7 +291,10 @@ public final class CustomRPC extends Plugin {
             Dispatcher dispatcher = StoreStream.getDispatcherYesThisIsIntentional();
             dispatcher.schedule(() -> {
                 synchronized (CustomRPC.this) {
-                    if (updatingPresence) return Unit.a;
+                    if (updatingPresence) {
+                        presenceUpdatePending = true;
+                        return Unit.a;
+                    }
                     updatingPresence = true;
                 }
                 try {
@@ -281,8 +316,14 @@ public final class CustomRPC extends Plugin {
                 } catch (Throwable error) {
                     logger.error("Failed to update CustomRPC presence", error);
                 } finally {
+                    boolean retry;
                     synchronized (CustomRPC.this) {
                         updatingPresence = false;
+                        retry = presenceUpdatePending;
+                        presenceUpdatePending = false;
+                    }
+                    if (retry && isEnabled()) {
+                        updatePresence(getActivityType(), createActivity());
                     }
                 }
                 return Unit.a;
@@ -317,13 +358,22 @@ public final class CustomRPC extends Plugin {
         String name = value(NAME, DEFAULT_NAME);
         String details = optional(DETAILS);
         String state = optional(STATE);
+        Long applicationId = parseApplicationId();
+        String largeImageKey = optional(LARGE_IMAGE);
         String largeImageUrl = publicImageUrl(optional(LARGE_IMAGE_URL));
-        String largeImageText = largeImageUrl == null ? null : optional(LARGE_IMAGE_TEXT);
+        String largeImage = largeImageUrl != null
+                ? activityImage(largeImageUrl, applicationId)
+                : applicationId != null ? largeImageKey : null;
+        String largeImageText = largeImage == null ? null : optional(LARGE_IMAGE_TEXT);
+        String smallImageKey = optional(SMALL_IMAGE);
         String smallImageUrl = publicImageUrl(optional(SMALL_IMAGE_URL));
-        String smallImageText = smallImageUrl == null ? null : optional(SMALL_IMAGE_TEXT);
+        String smallImage = smallImageUrl != null
+                ? activityImage(smallImageUrl, applicationId)
+                : applicationId != null ? smallImageKey : null;
+        String smallImageText = smallImage == null ? null : optional(SMALL_IMAGE_TEXT);
 
-        ActivityAssets assets = largeImageUrl != null || smallImageUrl != null
-                ? new ActivityAssets(largeImageUrl, largeImageText, smallImageUrl, smallImageText)
+        ActivityAssets assets = largeImage != null || smallImage != null
+                ? new ActivityAssets(largeImage, largeImageText, smallImage, smallImageText)
                 : null;
 
         return new Activity(
@@ -332,7 +382,7 @@ public final class CustomRPC extends Plugin {
                 null,
                 System.currentTimeMillis(),
                 null,
-                null,
+                applicationId,
                 details,
                 state,
                 null,
@@ -346,6 +396,135 @@ public final class CustomRPC extends Plugin {
                 null,
                 null
         );
+    }
+
+    private Long parseApplicationId() {
+        String raw = optional(APPLICATION_ID);
+        if (raw == null) return null;
+        try {
+            long value = Long.parseLong(raw);
+            return value > 0 ? value : null;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private void requestExternalImages() {
+        Long applicationId = parseApplicationId();
+        if (applicationId == null) return;
+
+        ArrayList<String> urls = new ArrayList<>(2);
+        addExternalImageUrl(urls, optional(LARGE_IMAGE_URL));
+        addExternalImageUrl(urls, optional(SMALL_IMAGE_URL));
+        if (urls.isEmpty()) return;
+
+        ArrayList<String> pending = new ArrayList<>(urls.size());
+        long now = System.currentTimeMillis();
+        for (String url : urls) {
+            String key = externalImageKey(applicationId, url);
+            if (externalImagePaths.containsKey(key)) continue;
+
+            Long failedAt = externalImageFailures.get(key);
+            if (failedAt != null && now - failedAt < EXTERNAL_IMAGE_RETRY_DELAY_MS) continue;
+            if (externalImageRequests.add(key)) pending.add(url);
+        }
+        if (pending.isEmpty()) return;
+
+        Utils.threadPool.execute(() -> fetchExternalImagePaths(applicationId, pending));
+    }
+
+    private void fetchExternalImagePaths(long applicationId, List<String> urls) {
+        Set<String> resolved = new java.util.HashSet<>();
+        boolean changed = false;
+        try {
+            JSONArray requestedUrls = new JSONArray();
+            for (String url : urls) requestedUrls.put(url);
+            JSONObject request = new JSONObject().put("urls", requestedUrls);
+            String route = "/applications/" + applicationId + "/external-assets";
+            try (Http.Request httpRequest = Http.Request.newDiscordRNRequest(route, "POST")) {
+                httpRequest.setRequestTimeout(10_000);
+                httpRequest.setHeader("Content-Type", "application/json");
+                String fingerprint = RestAPI.AppHeadersProvider.INSTANCE.getFingerprint();
+                if (fingerprint != null) httpRequest.setHeader("X-Fingerprint", fingerprint);
+                Http.Response response = httpRequest.executeWithBody(request.toString());
+                if (!response.ok()) {
+                    throw new IOException("Discord external image request failed with HTTP "
+                            + response.statusCode);
+                }
+
+                JSONArray assets = new JSONArray(response.text());
+                for (int i = 0; i < assets.length(); i++) {
+                    JSONObject asset = assets.optJSONObject(i);
+                    if (asset == null) continue;
+
+                    String sourceUrl = asset.optString("url", "").trim();
+                    String externalPath = asset.optString("external_asset_path", "").trim();
+                    if (assets.length() == urls.size()
+                            && (sourceUrl.isEmpty() || !urls.contains(sourceUrl))) {
+                        sourceUrl = urls.get(i);
+                    }
+                    if (!urls.contains(sourceUrl)) continue;
+
+                    String mediaProxyImage = mediaProxyImage(externalPath);
+                    if (mediaProxyImage == null) continue;
+                    externalImagePaths.put(externalImageKey(applicationId, sourceUrl), mediaProxyImage);
+                    resolved.add(sourceUrl);
+                    changed = true;
+                }
+            }
+        } catch (Throwable error) {
+            logger.error("Failed to proxy CustomRPC image URLs", error);
+        } finally {
+            long failedAt = System.currentTimeMillis();
+            for (String url : urls) {
+                String key = externalImageKey(applicationId, url);
+                externalImageRequests.remove(key);
+                if (resolved.contains(url)) {
+                    externalImageFailures.remove(key);
+                } else {
+                    externalImageFailures.put(key, failedAt);
+                }
+            }
+        }
+
+        if (changed) {
+            Utils.mainThread.post(() -> {
+                if (isEnabled()) applyActivity();
+            });
+        }
+    }
+
+    private static void addExternalImageUrl(List<String> urls, String value) {
+        String url = publicImageUrl(value);
+        if (url != null && !urls.contains(url)) urls.add(url);
+    }
+
+    private String activityImage(String url, Long applicationId) {
+        if (applicationId != null) {
+            String proxied = externalImagePaths.get(externalImageKey(applicationId, url));
+            if (proxied != null) return proxied;
+        }
+        return url;
+    }
+
+    private static String externalImageKey(long applicationId, String url) {
+        return applicationId + ":" + url;
+    }
+
+    private static String mediaProxyImage(String path) {
+        if (path == null || path.isEmpty()) return null;
+        String mediaProxyPrefix = "https://media.discordapp.net/";
+        if (path.regionMatches(true, 0, mediaProxyPrefix, 0, mediaProxyPrefix.length())) {
+            path = path.substring(mediaProxyPrefix.length());
+        }
+        while (path.startsWith("/")) path = path.substring(1);
+        return path.isEmpty() ? null : path.startsWith("mp:") ? path : "mp:" + path;
+    }
+
+    private void clearExternalImageCache() {
+        externalImagePaths.clear();
+        externalImageFailures.clear();
+        externalImageRequests.clear();
     }
 
     @SuppressWarnings("SameParameterValue")

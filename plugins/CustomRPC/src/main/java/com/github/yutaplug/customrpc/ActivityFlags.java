@@ -36,6 +36,26 @@ public final class ActivityFlags {
             "Embedded"
     };
 
+    public static final String[] DESCRIPTIONS = {
+            "Marks this as one specific running activity instance.",
+            "Allows other users to join the activity.",
+            "Allows other users to spectate the activity.",
+            "Allows other users to request to join the activity.",
+            "Allows the activity to be synchronized with other users.",
+            "Marks the activity as playable.",
+            "Allows friends to join the activity party.",
+            "Allows users in the same voice channel to join the activity party.",
+            "Marks the activity as embedded inside Discord."
+    };
+
+    public static String[] dialogLabels() {
+        String[] labels = new String[LABELS.length];
+        for (int i = 0; i < LABELS.length; i++) {
+            labels[i] = LABELS[i] + "\n" + DESCRIPTIONS[i];
+        }
+        return labels;
+    }
+
     public static String label(int flags) {
         StringBuilder label = new StringBuilder();
         for (int i = 0; i < VALUES.length; i++) {

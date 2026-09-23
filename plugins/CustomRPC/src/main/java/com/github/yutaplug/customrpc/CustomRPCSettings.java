@@ -1,11 +1,14 @@
 package com.github.yutaplug.customrpc;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.*;
+import android.net.Uri;
 import android.os.Bundle;
+import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -40,13 +43,16 @@ public final class CustomRPCSettings extends BottomSheet {
     private CheckedSetting enabledSetting;
     private TextView activityTypeSummary;
     private TextView activityFlagsSummary;
+    private EditText applicationId;
     private EditText name;
     private EditText details;
     private EditText state;
-    private EditText largeImageUrl;
+    private EditText largeImage;
     private EditText largeImageText;
-    private EditText smallImageUrl;
+    private EditText smallImage;
     private EditText smallImageText;
+    private EditText largeImageUrl;
+    private EditText smallImageUrl;
 
     public CustomRPCSettings(SettingsAPI settings, CustomRPC plugin) {
         this.settings = settings;
@@ -81,27 +87,41 @@ public final class CustomRPCSettings extends BottomSheet {
         details = addInput(context, "Details", CustomRPC.DETAILS, "");
         state = addInput(context, "State", CustomRPC.STATE, "");
 
-        addSectionHeader(context, "Images", false);
-        addIntro(context, "Use publicly accessible HTTP(S) image URLs. Discord must be able to fetch them.");
-        largeImageUrl = addInput(context, "Large image URL (optional)", CustomRPC.LARGE_IMAGE_URL,
+        addSectionHeader(context, "Application assets", false);
+        addIntro(context, "The Application ID is needed for uploaded asset keys and to proxy public HTTPS images for other Discord clients.");
+        applicationId = addInput(context, "Application ID", CustomRPC.APPLICATION_ID,
+                "");
+        applicationId.setInputType(InputType.TYPE_CLASS_NUMBER);
+        addButton(context, "Open Discord Developer Portal", () -> openDeveloperApplications(context));
+        largeImage = addInput(context, "Large image key (optional)", CustomRPC.LARGE_IMAGE,
                 "");
         largeImageText = addInput(context, "Large image text (optional)", CustomRPC.LARGE_IMAGE_TEXT,
                 "");
-        smallImageUrl = addInput(context, "Small image URL (optional)", CustomRPC.SMALL_IMAGE_URL,
+        smallImage = addInput(context, "Small image key (optional)", CustomRPC.SMALL_IMAGE,
                 "");
         smallImageText = addInput(context, "Small image text (optional)", CustomRPC.SMALL_IMAGE_TEXT,
+                "");
+
+        addSectionHeader(context, "Public HTTPS images", false);
+        addIntro(context, "Use publicly accessible HTTP(S) image URLs. Set an Application ID above so other Discord clients can see them. If both a URL and an application key are set for an image, the URL is used.");
+        largeImageUrl = addInput(context, "Large image URL (optional)", CustomRPC.LARGE_IMAGE_URL,
+                "");
+        smallImageUrl = addInput(context, "Small image URL (optional)", CustomRPC.SMALL_IMAGE_URL,
                 "");
 
         addButton(context, "Save and apply", () -> {
             plugin.enableActivitySharing(requireActivity());
             boolean applied = plugin.saveAndApply(
+                    text(applicationId),
                     text(name),
                     text(details),
                     text(state),
-                    text(largeImageUrl),
+                    text(largeImage),
                     text(largeImageText),
-                    text(smallImageUrl),
-                    text(smallImageText)
+                    text(smallImage),
+                    text(smallImageText),
+                    text(largeImageUrl),
+                    text(smallImageUrl)
             );
             if (applied) {
                 enabledSetting.setChecked(true);
@@ -116,6 +136,17 @@ public final class CustomRPCSettings extends BottomSheet {
             enabledSetting.setChecked(false);
             Utils.showToast("CustomRPC removed");
         });
+    }
+
+    private void openDeveloperApplications(Context context) {
+        try {
+            context.startActivity(new Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://discord.com/developers/applications")
+            ));
+        } catch (Throwable error) {
+            Utils.showToast("Could not open Discord Developer Portal");
+        }
     }
 
     private EditText addInput(Context context, String label, String key, String defaultValue) {
@@ -232,7 +263,7 @@ public final class CustomRPCSettings extends BottomSheet {
 
         AlertDialog dialog = new AlertDialog.Builder(requireContext())
                 .setTitle("Activity flags")
-                .setMultiChoiceItems(ActivityFlags.LABELS, checked,
+                .setMultiChoiceItems(ActivityFlags.dialogLabels(), checked,
                         (dialogInterface, which, isChecked) -> checked[which] = isChecked)
                 .setPositiveButton("Save", (dialogInterface, which) -> {
                     int flags = 0;
@@ -254,14 +285,33 @@ public final class CustomRPCSettings extends BottomSheet {
         TextView title = dialog.findViewById(R.id.alertTitle);
         if (title != null) title.setTextColor(Color.WHITE);
 
-        for (int i = 0; i < dialog.getListView().getChildCount(); i++) {
-            setTextColor(dialog.getListView().getChildAt(i), Color.WHITE);
+        ViewGroup list = dialog.getListView();
+        if (list != null) {
+            list.setOnHierarchyChangeListener(new ViewGroup.OnHierarchyChangeListener() {
+                @Override
+                public void onChildViewAdded(View parent, View child) {
+                    setTextColor(child, Color.WHITE);
+                }
+
+                @Override
+                public void onChildViewRemoved(View parent, View child) {
+                    // Nothing to do.
+                }
+            });
+            styleListChildren(list);
+            list.post(() -> styleListChildren(list));
         }
 
         for (int which : new int[]{AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE,
                 AlertDialog.BUTTON_NEUTRAL}) {
             TextView button = dialog.getButton(which);
             if (button != null) button.setTextColor(Color.WHITE);
+        }
+    }
+
+    private void styleListChildren(ViewGroup list) {
+        for (int i = 0; i < list.getChildCount(); i++) {
+            setTextColor(list.getChildAt(i), Color.WHITE);
         }
     }
 

@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class ProfileEffects extends Plugin {
     private static final String TAG = "ProfileEffects";
     private static final String CDN = "https://cdn.discordapp.com";
+    private static final int MAX_WEBVIEW_LAYER_SIZE = 8191;
     private static final long CACHE_DURATION = 10L * 60L * 1000L;
 
     private final Map<String, CachedProfile> profileCache = new ConcurrentHashMap<>();
@@ -1040,6 +1041,12 @@ public final class ProfileEffects extends Plugin {
             setClipToPadding(false);
         }
 
+        @Override
+        protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+            super.onSizeChanged(width, height, oldWidth, oldHeight);
+            resizeWebView();
+        }
+
         private void setEffect(Product effect) {
             if (this.effect == effect) return;
             this.effect = effect;
@@ -1126,8 +1133,9 @@ public final class ProfileEffects extends Plugin {
                 view.getSettings().setLoadsImagesAutomatically(true);
                 view.getSettings().setSupportZoom(false);
                 addView(view, new FrameLayout.LayoutParams(
-                        LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+                        LayoutParams.MATCH_PARENT, effectSurfaceHeight()));
                 webView = view;
+                resizeWebView();
                 view.loadDataWithBaseURL(
                         CDN + "/",
                         effectHtml(effect),
@@ -1165,6 +1173,29 @@ public final class ProfileEffects extends Plugin {
                             Log.e(TAG, "Effect image failed: " + id, error);
                         }
                     });
+        }
+
+        private void resizeWebView() {
+            if (webView == null) return;
+            ViewGroup.LayoutParams params = webView.getLayoutParams();
+            int height = effectSurfaceHeight();
+            if (params.height != height) {
+                params.height = height;
+                webView.setLayoutParams(params);
+            }
+        }
+
+        private int effectSurfaceHeight() {
+            if (effect == null || effect.effectLayers.isEmpty()) return 1;
+            int width = getWidth();
+            if (width <= 0) return 1;
+
+            float maxBottom = 1f;
+            for (EffectLayer layer : effect.effectLayers) {
+                float scale = width / (float) Math.max(1L, layer.width);
+                maxBottom = Math.max(maxBottom, layer.y + layer.height * scale);
+            }
+            return Math.max(1, Math.min(MAX_WEBVIEW_LAYER_SIZE, Math.round(maxBottom)));
         }
 
         private static void updateAspectRatio(SimpleDraweeView image, ImageInfo info) {
