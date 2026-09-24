@@ -1,0 +1,15 @@
+version = "1.0.0"
+description = "Makes Discord search-history clearing persist across app restarts."
+
+android {
+    namespace = "com.github.yutaplug.searchhistoryfix"
+}
+
+aliucord {
+    changelog.set(
+        """
+        # 1.0.0
+        * Make clearing search history persist immediately.
+        """.stripIndent(),
+    )
+}
