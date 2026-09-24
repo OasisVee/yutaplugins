@@ -74,13 +74,7 @@ public class KeyIntercept extends Plugin {
                 if (targetUserId.isEmpty()) targetUserId = currentUserId;
             }
         } catch (Throwable ignored) {
-            try {
-                long authId = StoreStream.getAuthentication().getId();
-                if (authId != 0) {
-                    currentUserId = String.valueOf(authId);
-                    if (targetUserId.isEmpty()) targetUserId = currentUserId;
-                }
-            } catch (Throwable ignored2) {}
+            // The user store may not be initialized yet. Retry on the next sync.
         }
     }
 
@@ -171,8 +165,10 @@ public class KeyIntercept extends Plugin {
             if (channelId != 0L) {
                 var channel = StoreStream.getChannels().getChannel(channelId);
                 if (channel != null) {
-                    guildId = channel.getGuildId();
-                    channelName = channel.getName();
+                    // Channel.i() and Channel.p() are the accessors exposed by Discord 126021.
+                    guildId = channel.i();
+                    String name = channel.p();
+                    channelName = name == null ? "" : name;
                 }
                 if (guildId != 0L) {
                     var guild = StoreStream.getGuilds().getGuild(guildId);
@@ -249,14 +245,12 @@ public class KeyIntercept extends Plugin {
                     return;
                 }
 
-                // 1. Fetch remote config
                 KeyInterceptConfig remote = RelayClient.readRemoteConfig(relayUrl, currentUserId, targetUserId);
                 if (remote != null) {
                     activeConfig = remote;
                     saveLocally();
                 }
 
-                // 2. If own profile, fetch requests and sync loopback
                 if (targetUserId.equals(currentUserId)) {
                     try {
                         pendingRequests = RelayClient.getAccessRequests(relayUrl, currentUserId);
