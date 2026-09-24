@@ -1,5 +1,5 @@
-version = "1.0.0"
-description = "Shows outgoing messages at full opacity immediately while they are being sent."
+version = "1.0.1"
+description = "Shows outgoing messages instantly without chat-list animations."
 
 aliucord {
     changelog.set("""
