@@ -429,11 +429,15 @@ public class KeyInterceptSettings extends BottomSheet {
         return sb.toString();
     }
 
-    private void addToggle(Context context, String title, String subtitle, boolean initial, CheckedSetting.OnCheckedListener listener) {
+    public interface OnToggleListener {
+        void onToggle(boolean checked);
+    }
+
+    private void addToggle(Context context, String title, String subtitle, boolean initial, OnToggleListener listener) {
         CheckedSetting setting = Utils.createCheckedSetting(
                 context, CheckedSetting.ViewType.SWITCH, title, subtitle);
         setting.setChecked(initial);
-        setting.setOnCheckedListener(listener);
+        setting.setOnCheckedListener(listener::onToggle);
         addView(setting);
     }
 

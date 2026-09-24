@@ -190,7 +190,7 @@ public class KeyIntercept extends Plugin {
         commands.registerCommand(
                 "keyintercept",
                 "Key Intercept configuration and status",
-                List.of(
+                java.util.Collections.singletonList(
                         Utils.createCommandOption(ApplicationCommandType.STRING, "action", "Action: status, sync, or reset")
                 ),
                 ctx -> {
