@@ -62,7 +62,9 @@ public class KeyIntercept extends Plugin {
 
         Utils.mainThread.postDelayed(() -> {
             resolveCurrentUserId();
-            syncConfigAsync(null);
+            // The local settings file is authoritative for the owner's profile.
+            // Do not replace it with a stale relay copy during plugin startup.
+            syncConfigAsync(false, null);
         }, 2000L);
     }
 
@@ -79,7 +81,6 @@ public class KeyIntercept extends Plugin {
     }
 
     private void patchSendMessage() {
-        // 1. Patch RestAPI.sendMessage
         try {
             Class<?> restApiClass = Class.forName("com.discord.utilities.rest.RestAPI");
             for (Method method : restApiClass.getDeclaredMethods()) {
@@ -103,7 +104,6 @@ public class KeyIntercept extends Plugin {
             logger.error("Failed patching RestAPI.sendMessage", t);
         }
 
-        // 2. Patch WidgetChatInput methods
         try {
             for (Method method : WidgetChatInput.class.getDeclaredMethods()) {
                 String name = method.getName().toLowerCase(Locale.ROOT);
@@ -165,7 +165,6 @@ public class KeyIntercept extends Plugin {
             if (channelId != 0L) {
                 var channel = StoreStream.getChannels().getChannel(channelId);
                 if (channel != null) {
-                    // Channel.i() and Channel.p() are the accessors exposed by Discord 126021.
                     guildId = channel.i();
                     String name = channel.p();
                     channelName = name == null ? "" : name;
@@ -196,7 +195,7 @@ public class KeyIntercept extends Plugin {
                 ctx -> {
                     String action = ctx.getString("action");
                     if ("sync".equalsIgnoreCase(action)) {
-                        syncConfigAsync(() -> Utils.showToast("Key Intercept synced!"));
+                        syncConfigAsync(true, () -> Utils.showToast("Key Intercept synced!"));
                         return new CommandsAPI.CommandResult("Syncing Key Intercept config with relay...");
                     } else if ("reset".equalsIgnoreCase(action)) {
                         activeConfig = new KeyInterceptConfig();
@@ -237,6 +236,15 @@ public class KeyIntercept extends Plugin {
     }
 
     public void syncConfigAsync(Runnable onComplete) {
+        syncConfigAsync(true, onComplete);
+    }
+
+    /**
+     * Sync with the relay. A startup sync must not overwrite the owner's local
+     * settings: an old/stale remote config was previously re-enabling disabled
+     * modes such as pet mode every time the plugin started.
+     */
+    private void syncConfigAsync(boolean applyRemoteConfig, Runnable onComplete) {
         new Thread(() -> {
             try {
                 if (currentUserId.isEmpty()) resolveCurrentUserId();
@@ -245,24 +253,33 @@ public class KeyIntercept extends Plugin {
                     return;
                 }
 
-                KeyInterceptConfig remote = RelayClient.readRemoteConfig(relayUrl, currentUserId, targetUserId);
-                if (remote != null) {
-                    activeConfig = remote;
-                    saveLocally();
+                boolean isOwnProfile = targetUserId.equals(currentUserId);
+                if (!isOwnProfile || applyRemoteConfig) {
+                    KeyInterceptConfig remote = RelayClient.readRemoteConfig(relayUrl, currentUserId, targetUserId);
+                    if (remote != null) {
+                        activeConfig = remote;
+                        saveLocally();
+                    }
+                } else {
+                    // Publish the config loaded from the device instead of
+                    // replacing it with whatever the relay currently has.
+                    RelayClient.pushRemoteConfig(relayUrl, currentUserId, currentUserId, activeConfig, null);
                 }
 
-                if (targetUserId.equals(currentUserId)) {
+                if (isOwnProfile) {
                     try {
                         pendingRequests = RelayClient.getAccessRequests(relayUrl, currentUserId);
                     } catch (Throwable ignored) {}
 
-                    try {
-                        JSONObject syncRes = RelayClient.syncInAppLoopback(relayUrl, currentUserId, localRevision);
-                        if (syncRes != null && syncRes.has("revision")) {
-                            localRevision = Math.max(localRevision, syncRes.optInt("revision", localRevision));
-                            settings.setInt("local_revision", localRevision);
-                        }
-                    } catch (Throwable ignored) {}
+                    if (applyRemoteConfig) {
+                        try {
+                            JSONObject syncRes = RelayClient.syncInAppLoopback(relayUrl, currentUserId, localRevision);
+                            if (syncRes != null && syncRes.has("revision")) {
+                                localRevision = Math.max(localRevision, syncRes.optInt("revision", localRevision));
+                                settings.setInt("local_revision", localRevision);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
                 }
             } catch (Throwable t) {
                 logger.error("Failed sync", t);
@@ -275,13 +292,13 @@ public class KeyIntercept extends Plugin {
     }
 
     public void loadConfigForTarget() {
-        syncConfigAsync(() -> Utils.showToast("Loaded config for " + targetUserId));
+        syncConfigAsync(true, () -> Utils.showToast("Loaded config for " + targetUserId));
     }
 
     public void approveRequestAsync(String requesterId) {
         new Thread(() -> {
             try {
-                RelayClient.approveAccessRequest(relayUrl, currentUserId, requesterId);
+                RelayClient.approveAccessRequest(currentUserId, requesterId);
                 pendingRequests.remove(requesterId);
                 if (!allowedEditors.contains(requesterId)) {
                     allowedEditors.add(requesterId);
@@ -296,7 +313,7 @@ public class KeyIntercept extends Plugin {
     public void denyRequestAsync(String requesterId) {
         new Thread(() -> {
             try {
-                RelayClient.denyAccessRequest(relayUrl, currentUserId, requesterId);
+                RelayClient.denyAccessRequest(currentUserId, requesterId);
                 pendingRequests.remove(requesterId);
             } catch (Throwable t) {
                 logger.error("Failed denying access request", t);
