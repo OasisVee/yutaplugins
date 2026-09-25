@@ -298,7 +298,7 @@ public class KeyIntercept extends Plugin {
     public void approveRequestAsync(String requesterId) {
         new Thread(() -> {
             try {
-                RelayClient.approveAccessRequest(currentUserId, requesterId);
+                RelayClient.approveAccessRequest(relayUrl, currentUserId, requesterId);
                 pendingRequests.remove(requesterId);
                 if (!allowedEditors.contains(requesterId)) {
                     allowedEditors.add(requesterId);
@@ -313,7 +313,7 @@ public class KeyIntercept extends Plugin {
     public void denyRequestAsync(String requesterId) {
         new Thread(() -> {
             try {
-                RelayClient.denyAccessRequest(currentUserId, requesterId);
+                RelayClient.denyAccessRequest(relayUrl, currentUserId, requesterId);
                 pendingRequests.remove(requesterId);
             } catch (Throwable t) {
                 logger.error("Failed denying access request", t);
