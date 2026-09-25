@@ -15,16 +15,16 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.aliucord.Utils;
-import com.aliucord.api.SettingsAPI;
 import com.aliucord.widgets.BottomSheet;
 import com.discord.utilities.color.ColorCompat;
 import com.discord.views.CheckedSetting;
 
+import java.util.List;
 import java.util.Locale;
 
 public class KeyInterceptSettings extends BottomSheet {
     private final KeyIntercept plugin;
-    private TextView statusView;
+    private String statusMessage = "";
 
     public KeyInterceptSettings(KeyIntercept plugin) {
         this.plugin = plugin;
@@ -33,78 +33,163 @@ public class KeyInterceptSettings extends BottomSheet {
     @Override
     public void onViewCreated(View view, Bundle bundle) {
         super.onViewCreated(view, bundle);
-        Context context = requireContext();
-        getLinearLayout().setPadding(dp(context, 16), dp(context, 8), dp(context, 16), dp(context, 24));
+        rebuildUI();
+    }
 
-        addIntro(context, "Key Intercept control center for mobile. View, configure, and sync your distortions and permissions.");
+    public void rebuildUI() {
+        Context context = getContext();
+        if (context == null) return;
 
-        statusView = new TextView(context);
-        statusView.setTextColor(Color.LTGRAY);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        statusView.setPadding(0, dp(context, 4), 0, dp(context, 8));
-        statusView.setText("Target: " + (plugin.targetUserId.equals(plugin.currentUserId) ? "My Profile" : plugin.targetUserId));
-        getLinearLayout().addView(statusView);
+        LinearLayout layout = getLinearLayout();
+        layout.removeAllViews();
+        layout.setPadding(dp(context, 16), dp(context, 8), dp(context, 16), dp(context, 24));
 
-        addSectionHeader(context, "Profile Target", true);
-        addAction(context, "Switch Target User", "Current: " + plugin.targetUserId, () -> showTargetUserDialog(context));
+        boolean isOwnProfile = plugin.targetUserId.isEmpty() || plugin.targetUserId.equals(plugin.currentUserId);
+        String targetLabel = isOwnProfile ? "Your Profile" : "User " + plugin.targetUserId;
 
-        addSectionHeader(context, "Relay Server", false);
-        addAction(context, "Relay URL", plugin.relayUrl, () -> showRelayUrlDialog(context));
-        addAction(context, "Sync with Relay", "Upload or fetch latest configuration", () -> {
-            updateStatus("Syncing...");
-            plugin.syncConfigAsync(() -> updateStatus("Sync complete!"));
-        });
+        // Intro & Banner
+        addIntro(context, "Key Intercept distortion control center. Instantly toggle modes, configure timeouts, and sync permissions.");
 
-        addSectionHeader(context, "Timeouts & Distortions", false);
-        addTimeoutRow(context, "Gag", "gag_end");
-        addTimeoutRow(context, "Pet", "pet_end");
-        addAction(context, "Pet Type", "Current: " + getPetTypeName(plugin.activeConfig.config.petType), () -> showPetTypeDialog(context));
-        addAction(context, "Pet Amount", Math.round(plugin.activeConfig.config.petAmount * 100) + "%", () -> showPetAmountDialog(context));
+        TextView bannerView = new TextView(context);
+        bannerView.setText("Active Profile: " + targetLabel + (statusMessage.isEmpty() ? "" : " | " + statusMessage));
+        bannerView.setTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
+        bannerView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        bannerView.setPadding(0, dp(context, 4), 0, dp(context, 12));
+        layout.addView(bannerView);
 
-        addTimeoutRow(context, "Bimbo", "bimbo_end");
-        addAction(context, "Bimbo Word Length", String.valueOf(plugin.activeConfig.config.bimboWordLength), () -> showBimboLengthDialog(context));
+        // Section 1: Main Distortions (with explicit ON/OFF switches)
+        addSectionHeader(context, "Speech Distortions", true);
 
-        addTimeoutRow(context, "Horny", "horny_end");
-        addTimeoutRow(context, "UWU", "uwu_end");
-        addTimeoutRow(context, "Censored", "censored_end");
-        addAction(context, "Censored Replacement", plugin.activeConfig.config.censoredReplacement, () -> showCensoredReplacementDialog(context));
-        addAction(context, "Censored Words", plugin.activeConfig.censoredWords.size() + " words", () -> showCensoredWordsDialog(context));
+        addDistortionToggle(context, "Gag", "gag_end",
+                "Replaces letters with g/h sounds while preserving vowels & emotes");
 
-        addTimeoutRow(context, "Drone", "drone_end");
-        addAction(context, "Drone Term", plugin.activeConfig.droneConfig.droneTerm, () -> showDroneTermDialog(context));
-        addAction(context, "Drone Health", plugin.activeConfig.droneConfig.droneHealth + "%", () -> showDroneHealthDialog(context));
+        addDistortionToggle(context, "Pet", "pet_end",
+                "Replaces words with pet noises (" + getPetTypeName(plugin.activeConfig.config.petType) + ", " + Math.round(plugin.activeConfig.config.petAmount * 100) + "%)");
+        if (isDistortionActive("pet_end")) {
+            addAction(context, "  ↳ Pet Type", "Current: " + getPetTypeName(plugin.activeConfig.config.petType), () -> showPetTypeDialog(context));
+            addAction(context, "  ↳ Pet Amount", "Current: " + Math.round(plugin.activeConfig.config.petAmount * 100) + "%", () -> showPetAmountDialog(context));
+        }
 
+        addDistortionToggle(context, "Bimbo", "bimbo_end",
+                "Adds 'like totally', gargle words, and caps max word length (" + plugin.activeConfig.config.bimboWordLength + " chars)");
+        if (isDistortionActive("bimbo_end")) {
+            addAction(context, "  ↳ Max Word Length", plugin.activeConfig.config.bimboWordLength + " characters", () -> showBimboLengthDialog(context));
+        }
+
+        addDistortionToggle(context, "Horny", "horny_end",
+                "Randomly inserts horny sounds throughout messages");
+
+        addDistortionToggle(context, "UWU", "uwu_end",
+                "Transforms letters to uwu/nyan style");
+
+        addDistortionToggle(context, "Censored", "censored_end",
+                "Censors specified words using '" + plugin.activeConfig.config.censoredReplacement + "'");
+        if (isDistortionActive("censored_end")) {
+            addAction(context, "  ↳ Censored Replacement Char", "'" + plugin.activeConfig.config.censoredReplacement + "'", () -> showCensoredReplacementDialog(context));
+            addAction(context, "  ↳ Censored Words List", plugin.activeConfig.censoredWords.size() + " word(s) configured", () -> showCensoredWordsDialog(context));
+        }
+
+        addDistortionToggle(context, "Drone", "drone_end",
+                "Appends speech/action/whisper/loud drone headers & footers (Health: " + plugin.activeConfig.droneConfig.droneHealth + "%)");
+        if (isDistortionActive("drone_end")) {
+            addAction(context, "  ↳ Drone Term", plugin.activeConfig.droneConfig.droneTerm, () -> showDroneTermDialog(context));
+            addAction(context, "  ↳ Drone Health", plugin.activeConfig.droneConfig.droneHealth + "%", () -> showDroneHealthDialog(context));
+        }
+
+        addDistortionToggle(context, "Custom Rules", "rules_end",
+                "Applies custom regex replacement rules (" + plugin.activeConfig.rules.size() + " rule(s))");
+
+        // Section 2: Scope Filter
         addSectionHeader(context, "Scope Filter", false);
-        addToggle(context, "Filter Mode (Blacklist)", "Filter mode: " + plugin.activeConfig.filterMode,
-                "blacklist".equalsIgnoreCase(plugin.activeConfig.filterMode),
+        boolean isBlacklist = "blacklist".equalsIgnoreCase(plugin.activeConfig.filterMode);
+        addToggle(context, "Filter Mode: " + (isBlacklist ? "Blacklist" : "Whitelist"),
+                isBlacklist ? "Distorts everywhere EXCEPT listed servers/channels" : "ONLY distorts inside listed servers/channels",
+                isBlacklist,
                 val -> {
                     plugin.activeConfig.filterMode = val ? "blacklist" : "whitelist";
                     plugin.saveAndPushAsync();
-                    updateStatus("Filter mode: " + plugin.activeConfig.filterMode);
+                    setStatus("Filter mode updated to " + plugin.activeConfig.filterMode);
+                    rebuildUI();
                 });
-        addAction(context, "Add Server/Channel ID", "Whitelist/blacklist entries", () -> showAddScopeDialog(context));
+        addAction(context, "Add Server / Channel ID", "Add ID to scope list", () -> showAddScopeDialog(context));
 
-        addSectionHeader(context, "Permissions & Debug", false);
-        addToggle(context, "Debug Mode", "Appends original message to sent messages",
+        List<KeyInterceptConfig.ScopeItem> scopeList = isBlacklist ? plugin.activeConfig.blacklist : plugin.activeConfig.whitelist;
+        if (!scopeList.isEmpty()) {
+            for (int i = 0; i < scopeList.size(); i++) {
+                final int idx = i;
+                KeyInterceptConfig.ScopeItem item = scopeList.get(i);
+                String label = item.serverName.isEmpty() ? ("ID: " + item.discordId) : (item.serverName + " (" + item.discordId + ")");
+                addAction(context, "  • " + label, "Tap to remove from scope", () -> {
+                    plugin.activeConfig.whitelist.remove(idx);
+                    if (idx < plugin.activeConfig.blacklist.size()) {
+                        plugin.activeConfig.blacklist.remove(idx);
+                    }
+                    plugin.saveAndPushAsync();
+                    setStatus("Removed scope item");
+                    rebuildUI();
+                });
+            }
+        }
+
+        // Section 3: Target & Relay Settings
+        addSectionHeader(context, "Relay & Synchronization", false);
+        addAction(context, "Switch Target Profile", "Current target: " + targetLabel, () -> showTargetUserDialog(context));
+        addAction(context, "Relay Server URL", plugin.relayUrl, () -> showRelayUrlDialog(context));
+        addAction(context, "Sync with Relay Now", "Push local changes and fetch latest remote config", () -> {
+            setStatus("Syncing...");
+            plugin.syncConfigAsync(() -> {
+                setStatus("Sync complete!");
+                rebuildUI();
+            });
+        });
+
+        // Section 4: Permissions & Requests
+        addSectionHeader(context, "Permissions & Editors", false);
+        addToggle(context, "Debug Mode", "Appends (original message: ...) to sent messages",
                 plugin.activeConfig.config.debug,
                 val -> {
                     plugin.activeConfig.config.debug = val;
                     plugin.saveAndPushAsync();
+                    rebuildUI();
                 });
-        addAction(context, "Allowed Editors", plugin.allowedEditors.size() + " editors", () -> showAllowedEditorsDialog(context));
-        addAction(context, "Pending Access Requests", plugin.pendingRequests.size() + " requests", () -> showAccessRequestsDialog(context));
-    }
 
-    private void updateStatus(String msg) {
-        if (statusView != null) {
-            Utils.mainThread.post(() -> statusView.setText(msg));
+        addAction(context, "Allowed Editors (" + plugin.allowedEditors.size() + ")", "Manage users who can edit your config", () -> showAllowedEditorsDialog(context));
+        if (!plugin.pendingRequests.isEmpty()) {
+            addAction(context, "Pending Access Requests (" + plugin.pendingRequests.size() + ")", "Approve or deny remote edit requests", () -> showAccessRequestsDialog(context));
         }
     }
 
-    private void addTimeoutRow(Context context, String label, String field) {
-        String currentEnd = getTimeoutField(field);
-        String status = formatTimeout(currentEnd);
-        addAction(context, label + " Timeout", status, () -> showTimeoutOptions(context, label, field));
+    private boolean isDistortionActive(String field) {
+        String endIso = getTimeoutField(field);
+        return KeyInterceptConfig.isTimeActive(endIso);
+    }
+
+    private void addDistortionToggle(Context context, String label, String field, String description) {
+        boolean active = isDistortionActive(field);
+        String timeStatus = formatTimeout(getTimeoutField(field));
+
+        addToggle(context, label + " Distortion [" + (active ? "ON" : "OFF") + "]",
+                description + " • " + timeStatus,
+                active,
+                enabled -> {
+                    if (enabled) {
+                        setTimeoutField(field, KeyInterceptConfig.FAR_FUTURE);
+                        if ("pet_end".equals(field) && plugin.activeConfig.config.petAmount <= 0) {
+                            plugin.activeConfig.config.petAmount = 0.75;
+                        }
+                    } else {
+                        setTimeoutField(field, KeyInterceptConfig.EPOCH);
+                    }
+                    plugin.saveAndPushAsync();
+                    setStatus(label + (enabled ? " Enabled" : " Disabled"));
+                    rebuildUI();
+                });
+
+        addAction(context, "  ↳ " + label + " Timeout Options", "Current: " + timeStatus + " (Tap to change duration)", () -> showTimeoutOptions(context, label, field));
+    }
+
+    private void setStatus(String msg) {
+        this.statusMessage = msg;
     }
 
     private String getTimeoutField(String field) {
@@ -117,6 +202,7 @@ public class KeyInterceptSettings extends BottomSheet {
             case "uwu_end": return c.uwuEnd;
             case "censored_end": return c.censoredEnd;
             case "drone_end": return c.droneEnd;
+            case "rules_end": return c.rulesEnd;
             default: return KeyInterceptConfig.EPOCH;
         }
     }
@@ -131,15 +217,15 @@ public class KeyInterceptSettings extends BottomSheet {
             case "uwu_end": c.uwuEnd = val; break;
             case "censored_end": c.censoredEnd = val; break;
             case "drone_end": c.droneEnd = val; break;
+            case "rules_end": c.rulesEnd = val; break;
         }
-        plugin.saveAndPushAsync();
     }
 
     private void showTimeoutOptions(Context context, String label, String field) {
-        String[] options = new String[]{"+1 Minute", "+10 Minutes", "+1 Hour", "+24 Hours", "Permanent", "Off"};
-        new AlertDialog.Builder(context)
-                .setTitle(label + " Timeout")
-                .setItems(options, (dialog, which) -> {
+        String[] options = new String[]{"+1 Minute", "+10 Minutes", "+1 Hour", "+24 Hours", "Permanent (Always On)", "Turn Off"};
+        AlertDialog dialog = new AlertDialog.Builder(context)
+                .setTitle(label + " Duration Options")
+                .setItems(options, (d, which) -> {
                     long now = System.currentTimeMillis();
                     long current = KeyInterceptConfig.parseIsoTimestamp(getTimeoutField(field));
                     long base = Math.max(now, current);
@@ -151,36 +237,44 @@ public class KeyInterceptSettings extends BottomSheet {
                         case 4: setTimeoutField(field, KeyInterceptConfig.FAR_FUTURE); break;
                         case 5: setTimeoutField(field, KeyInterceptConfig.EPOCH); break;
                     }
-                    updateStatus(label + " timeout updated!");
+                    plugin.saveAndPushAsync();
+                    setStatus(label + " timeout updated!");
+                    rebuildUI();
                 })
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, null));
+        dialog.show();
     }
 
     private void showTargetUserDialog(Context context) {
         EditText input = createEditText(context, "Discord User ID", plugin.targetUserId);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Target Discord User ID")
                 .setView(input)
                 .setNeutralButton("My Profile", (d, w) -> {
                     plugin.targetUserId = plugin.currentUserId;
                     plugin.loadConfigForTarget();
-                    updateStatus("Switched to own profile");
+                    setStatus("Switched to own profile");
+                    rebuildUI();
                 })
-                .setPositiveButton("Load", (d, w) -> {
+                .setPositiveButton("Load Target", (d, w) -> {
                     String id = input.getText().toString().trim();
                     if (!id.isEmpty()) {
                         plugin.targetUserId = id;
                         plugin.loadConfigForTarget();
-                        updateStatus("Loading " + id + "...");
+                        setStatus("Loading profile for " + id + "...");
+                        rebuildUI();
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showRelayUrlDialog(Context context) {
         EditText input = createEditText(context, "Relay URL", plugin.relayUrl);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Relay Server URL")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -188,30 +282,36 @@ public class KeyInterceptSettings extends BottomSheet {
                     if (!url.isEmpty()) {
                         plugin.relayUrl = url;
                         plugin.settings.setString("relay_url", url);
-                        updateStatus("Relay URL saved");
+                        setStatus("Relay URL saved");
+                        rebuildUI();
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showPetTypeDialog(Context context) {
         String[] types = new String[]{"1. Puppy", "2. Kitty", "3. Cow", "4. Fox", "5. Birb", "6. Bee", "7. Bun"};
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Select Pet Type")
                 .setItems(types, (d, which) -> {
                     plugin.activeConfig.config.petType = which + 1;
                     plugin.activeConfig.petWords = KeyInterceptConfig.PET_WORDS_BY_TYPE.get(which + 1);
                     plugin.saveAndPushAsync();
-                    updateStatus("Pet type: " + getPetTypeName(which + 1));
+                    setStatus("Pet type: " + getPetTypeName(which + 1));
+                    rebuildUI();
                 })
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, null));
+        dialog.show();
     }
 
     private void showPetAmountDialog(Context context) {
         EditText input = createEditText(context, "Percentage (0-100)", String.valueOf(Math.round(plugin.activeConfig.config.petAmount * 100)));
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Pet Amount (%)")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -219,17 +319,20 @@ public class KeyInterceptSettings extends BottomSheet {
                         int pct = Integer.parseInt(input.getText().toString().trim());
                         plugin.activeConfig.config.petAmount = Math.max(0, Math.min(100, pct)) / 100.0;
                         plugin.saveAndPushAsync();
-                        updateStatus("Pet amount: " + pct + "%");
+                        setStatus("Pet amount set to " + pct + "%");
+                        rebuildUI();
                     } catch (Exception ignored) {}
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showBimboLengthDialog(Context context) {
         EditText input = createEditText(context, "Word length", String.valueOf(plugin.activeConfig.config.bimboWordLength));
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Bimbo Max Word Length")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -237,16 +340,19 @@ public class KeyInterceptSettings extends BottomSheet {
                         int len = Integer.parseInt(input.getText().toString().trim());
                         plugin.activeConfig.config.bimboWordLength = Math.max(1, len);
                         plugin.saveAndPushAsync();
-                        updateStatus("Bimbo max word length: " + len);
+                        setStatus("Max word length set to " + len);
+                        rebuildUI();
                     } catch (Exception ignored) {}
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showCensoredReplacementDialog(Context context) {
         EditText input = createEditText(context, "Replacement char", plugin.activeConfig.config.censoredReplacement);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Censored Replacement Character")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -254,11 +360,14 @@ public class KeyInterceptSettings extends BottomSheet {
                     if (!rep.isEmpty()) {
                         plugin.activeConfig.config.censoredReplacement = rep;
                         plugin.saveAndPushAsync();
-                        updateStatus("Censored replacement: " + rep);
+                        setStatus("Replacement char set to '" + rep + "'");
+                        rebuildUI();
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showCensoredWordsDialog(Context context) {
@@ -267,7 +376,7 @@ public class KeyInterceptSettings extends BottomSheet {
         EditText input = createEditText(context, "One word per line", sb.toString().trim());
         input.setSingleLine(false);
         input.setLines(5);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Censored Words (one per line)")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -277,15 +386,18 @@ public class KeyInterceptSettings extends BottomSheet {
                         if (!t.isEmpty()) plugin.activeConfig.censoredWords.add(t);
                     }
                     plugin.saveAndPushAsync();
-                    updateStatus("Saved " + plugin.activeConfig.censoredWords.size() + " censored words");
+                    setStatus("Saved " + plugin.activeConfig.censoredWords.size() + " censored word(s)");
+                    rebuildUI();
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showDroneTermDialog(Context context) {
         EditText input = createEditText(context, "Drone term (e.g. Drone, Unit)", plugin.activeConfig.droneConfig.droneTerm);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Drone Term")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -293,17 +405,20 @@ public class KeyInterceptSettings extends BottomSheet {
                     if (!term.isEmpty()) {
                         plugin.activeConfig.droneConfig.droneTerm = term;
                         plugin.saveAndPushAsync();
-                        updateStatus("Drone term: " + term);
+                        setStatus("Drone term: " + term);
+                        rebuildUI();
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showDroneHealthDialog(Context context) {
         EditText input = createEditText(context, "Health (0-100)", String.valueOf(plugin.activeConfig.droneConfig.droneHealth));
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Drone Health (%)")
                 .setView(input)
                 .setPositiveButton("Save", (d, w) -> {
@@ -311,17 +426,20 @@ public class KeyInterceptSettings extends BottomSheet {
                         int h = Integer.parseInt(input.getText().toString().trim());
                         plugin.activeConfig.droneConfig.droneHealth = Math.max(0, Math.min(100, h));
                         plugin.saveAndPushAsync();
-                        updateStatus("Drone health: " + h + "%");
+                        setStatus("Drone health: " + h + "%");
+                        rebuildUI();
                     } catch (Exception ignored) {}
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showAddScopeDialog(Context context) {
         EditText input = createEditText(context, "Server or Channel ID", "");
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Add Scope ID")
                 .setView(input)
                 .setPositiveButton("Add", (d, w) -> {
@@ -331,17 +449,20 @@ public class KeyInterceptSettings extends BottomSheet {
                         plugin.activeConfig.whitelist.add(item);
                         plugin.activeConfig.blacklist.add(item);
                         plugin.saveAndPushAsync();
-                        updateStatus("Added scope ID: " + id);
+                        setStatus("Added scope ID: " + id);
+                        rebuildUI();
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showAllowedEditorsDialog(Context context) {
         EditText input = createEditText(context, "Discord ID to allow", "");
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Allowed Editors (" + plugin.allowedEditors.size() + ")")
                 .setView(input)
                 .setPositiveButton("Add Editor", (d, w) -> {
@@ -349,16 +470,20 @@ public class KeyInterceptSettings extends BottomSheet {
                     if (!id.isEmpty() && !plugin.allowedEditors.contains(id)) {
                         plugin.allowedEditors.add(id);
                         plugin.saveAndPushAsync();
-                        updateStatus("Added editor: " + id);
+                        setStatus("Added editor: " + id);
+                        rebuildUI();
                     }
                 })
                 .setNeutralButton("Clear All", (d, w) -> {
                     plugin.allowedEditors.clear();
                     plugin.saveAndPushAsync();
-                    updateStatus("Cleared editors");
+                    setStatus("Cleared editors");
+                    rebuildUI();
                 })
                 .setNegativeButton("Close", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, input));
+        dialog.show();
     }
 
     private void showAccessRequestsDialog(Context context) {
@@ -367,23 +492,54 @@ public class KeyInterceptSettings extends BottomSheet {
             return;
         }
         String[] requests = plugin.pendingRequests.toArray(new String[0]);
-        new AlertDialog.Builder(context)
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle("Pending Requests")
                 .setItems(requests, (d, which) -> {
                     String reqId = requests[which];
-                    new AlertDialog.Builder(context)
+                    AlertDialog subDialog = new AlertDialog.Builder(context)
                             .setTitle("Request from " + reqId)
                             .setPositiveButton("Approve", (d2, w2) -> {
                                 plugin.approveRequestAsync(reqId);
-                                updateStatus("Approved: " + reqId);
+                                setStatus("Approved: " + reqId);
+                                rebuildUI();
                             })
                             .setNegativeButton("Deny", (d2, w2) -> {
                                 plugin.denyRequestAsync(reqId);
-                                updateStatus("Denied: " + reqId);
+                                setStatus("Denied: " + reqId);
+                                rebuildUI();
                             })
-                            .show();
+                            .create();
+                    subDialog.setOnShowListener(subD -> styleDialog(subDialog, null));
+                    subDialog.show();
                 })
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> styleDialog(dialog, null));
+        dialog.show();
+    }
+
+    private void styleDialog(AlertDialog dialog, EditText input) {
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.rgb(43, 45, 49)));
+        }
+
+        int titleId = dialog.getContext().getResources().getIdentifier("alertTitle", "id", "android");
+        TextView title = titleId == 0 ? null : dialog.findViewById(titleId);
+        if (title == null) title = dialog.findViewById(androidx.appcompat.R.id.alertTitle);
+        if (title != null) title.setTextColor(Color.WHITE);
+
+        TextView message = dialog.findViewById(android.R.id.message);
+        if (message != null) message.setTextColor(Color.WHITE);
+        if (input != null) {
+            input.setTextColor(Color.WHITE);
+            input.setHintTextColor(Color.LTGRAY);
+            input.setBackgroundColor(Color.rgb(30, 31, 34));
+            input.setPadding(dp(dialog.getContext(), 12), dp(dialog.getContext(), 8), dp(dialog.getContext(), 12), dp(dialog.getContext(), 8));
+        }
+
+        for (int which : new int[]{AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE, AlertDialog.BUTTON_NEUTRAL}) {
+            TextView button = dialog.getButton(which);
+            if (button != null) button.setTextColor(Color.rgb(88, 101, 242));
+        }
     }
 
     private EditText createEditText(Context context, String hint, String initialText) {
@@ -392,6 +548,7 @@ public class KeyInterceptSettings extends BottomSheet {
         et.setText(initialText);
         et.setTextColor(Color.WHITE);
         et.setHintTextColor(Color.LTGRAY);
+        et.setBackgroundColor(Color.rgb(30, 31, 34));
         et.setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8));
         return et;
     }
@@ -412,7 +569,7 @@ public class KeyInterceptSettings extends BottomSheet {
     private String formatTimeout(String endIso) {
         long endMs = KeyInterceptConfig.parseIsoTimestamp(endIso);
         long now = System.currentTimeMillis();
-        if (endMs <= now) return "Off / Expired";
+        if (endMs <= now) return "OFF";
         if (endMs >= KeyInterceptConfig.parseIsoTimestamp(KeyInterceptConfig.FAR_FUTURE) - 5000) {
             return "Permanent";
         }
@@ -438,7 +595,7 @@ public class KeyInterceptSettings extends BottomSheet {
                 context, CheckedSetting.ViewType.SWITCH, title, subtitle);
         setting.setChecked(initial);
         setting.setOnCheckedListener(listener::onToggle);
-        addView(setting);
+        getLinearLayout().addView(setting);
     }
 
     private void addAction(Context context, String title, String subtitle, Runnable action) {
@@ -455,13 +612,13 @@ public class KeyInterceptSettings extends BottomSheet {
 
         TextView titleView = new TextView(context);
         titleView.setText(title);
-        titleView.setTextColor(Color.WHITE);
+        titleView.setTextColor(themeColor(context, "colorHeaderPrimary", Color.WHITE));
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         row.addView(titleView, new LinearLayout.LayoutParams(-1, -2));
 
         TextView subtitleView = new TextView(context);
         subtitleView.setText(subtitle);
-        subtitleView.setTextColor(Color.LTGRAY);
+        subtitleView.setTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
         subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         subtitleView.setPadding(0, dp(context, 2), 0, 0);
         row.addView(subtitleView, new LinearLayout.LayoutParams(-1, -2));
@@ -475,7 +632,7 @@ public class KeyInterceptSettings extends BottomSheet {
     private void addIntro(Context context, String text) {
         TextView intro = new TextView(context);
         intro.setText(text);
-        intro.setTextColor(Color.LTGRAY);
+        intro.setTextColor(themeColor(context, "colorTextMuted", Color.LTGRAY));
         intro.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         intro.setPadding(0, 0, 0, dp(context, 6));
         getLinearLayout().addView(intro, new LinearLayout.LayoutParams(-1, -2));
@@ -484,12 +641,17 @@ public class KeyInterceptSettings extends BottomSheet {
     private void addSectionHeader(Context context, String title, boolean first) {
         TextView header = new TextView(context);
         header.setText(title.toUpperCase(Locale.ROOT));
-        header.setTextColor(Color.rgb(88, 101, 242));
+        header.setTextColor(themeColor(context, "colorBrand", Color.rgb(88, 101, 242)));
         header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         header.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         header.setLetterSpacing(0.08f);
         header.setPadding(0, first ? dp(context, 8) : dp(context, 16), 0, dp(context, 6));
         getLinearLayout().addView(header, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private int themeColor(Context context, String attribute, int fallback) {
+        int id = Utils.getResId(attribute, "attr");
+        return id == 0 ? fallback : ColorCompat.getThemedColor(context, id);
     }
 
     private int dp(Context context, int value) {
